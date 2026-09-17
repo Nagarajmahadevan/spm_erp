@@ -1,5 +1,5 @@
-import { useMemo, useState } from "react";
-import { ATTENDANCE_SETTINGS, ENGINEER, JOB_TYPES, addDaysIso, customerSites, dateIso, dayDifference, engineers, istStamp, istTime, label12h, metersBetween, nowIso, prettyDate, siteById, stamp } from "./erpMasters";
+import { Fragment, useMemo, useState } from "react";
+import { ATTENDANCE_SETTINGS, CITIES, ENGINEER, JOB_TYPES, addDaysIso, customerSites, dateIso, dayDifference, engineers, istStamp, istTime, label12h, metersBetween, nowIso, prettyDate, shortDay, siteById, stamp, timeToMinutes, weekStart } from "./erpMasters";
 import spmLogo from "@/imports/SPM_Logo.png";
 import { COMPANY } from "./erpMasters";
 import { invoiceFromJob, nextNumber as nextInvoiceNumber } from "./Invoices";
@@ -17,6 +17,7 @@ const nextJobNumber = (jobs: Job[]) => `JOB-${Math.max(1041, ...jobs.map((job) =
 const sameCity = (a?: string, b?: string) => a?.toLowerCase() === b?.toLowerCase();
 const scheduledLabel = (job: Job) => job.scheduledDate ? prettyDate(job.scheduledDate) : "Not scheduled";
 const needsCertificate = (type: JobType) => type === "Calibration" || type === "Validation/Testing";
+const hoursLabel = (minutes: number) => `${Number((minutes / 60).toFixed(1))}h`;
 
 function blankJob(number: string, overrides?: Partial<Job>): Job {
   return { id: number, number, type: "Calibration", customer: "", siteId: "", instrumentIds: [], stockIds: [], description: "", doneAt: "Site visit", scheduledDate: "", hours: 2, status: "Unassigned", expectedSpares: [], usedSpares: [], results: [], travelNotes: "", photos: 0, activities: [{ title: "Job created", meta: stamp(), tone: "system" }], ...overrides };
@@ -24,7 +25,7 @@ function blankJob(number: string, overrides?: Partial<Job>): Job {
 
 export default function Jobs({ isEngineer = false, focusJob, newJobPrefill, openInvoice }: { isEngineer?: boolean; focusJob?: string; newJobPrefill?: Partial<Job>; openInvoice?: (invoiceId: string) => void }) {
   const store = useErpStore();
-  const [section, setSection] = useState<"list" | "today">("list");
+  const [section, setSection] = useState<"list" | "schedule" | "today">("list");
   const [tab, setTab] = useState<JobStatus | "All Jobs">("All Jobs");
   const [billing, setBilling] = useState("All billing statuses");
   const [openId, setOpenId] = useState<string | null>(focusJob ?? null);
@@ -59,8 +60,8 @@ export default function Jobs({ isEngineer = false, focusJob, newJobPrefill, open
   </section>;
   return <section className="leads-page jobs-page">
     <div className="leads-heading"><div><p className="erp-secondary-text">Operations / Jobs</p><h1>Jobs</h1></div><button className="erp-action" onClick={() => setCreating(true)}>+ New Job</button></div>
-    <div className="stock-tabs jobs-view-tabs">{(["list", "today"] as const).map((view) => <button key={view} className={section === view ? "is-active" : ""} onClick={() => setSection(view)}>{view === "list" ? "Jobs List" : "Today"}</button>)}</div>
-    {section === "today" ? <JobsToday store={store} openJob={setOpenId} /> : <>
+    <div className="stock-tabs jobs-view-tabs">{(["list", "schedule", "today"] as const).map((view) => <button key={view} className={section === view ? "is-active" : ""} onClick={() => setSection(view)}>{view === "list" ? "Jobs List" : view === "schedule" ? "Schedule" : "Today"}</button>)}</div>
+    {section === "schedule" ? <ScheduleBoard store={store} openJob={setOpenId} flash={flash} /> : section === "today" ? <JobsToday store={store} openJob={setOpenId} /> : <>
       <div className="stock-tabs job-tabs">{STATUS_TABS.map((status) => <button key={status} className={tab === status ? "is-active" : ""} onClick={() => setTab(status)}>{status} <span>{countFor(status)}</span></button>)}</div>
       <div className="erp-filters jobs-filters">
         <label className="jobs-search"><span>Search</span><input placeholder="Job, customer or site" value={query} onChange={(event) => setQuery(event.target.value)} /></label>
@@ -128,6 +129,47 @@ function JobsToday({ store, openJob }: { store: ReturnType<typeof useErpStore>; 
     <p className="erp-muted jobs-refresh-note">Recorded visit events only. Location is recorded at check-in and checkout.</p>
     {detail && <Overlay label={`Visit details ${detail.jobNumber}`} onClose={() => setSelected(null)} className="stock-modal-backdrop jobs-drawer-backdrop"><section className="jobs-visit-drawer"><header><div><h2>Visit details</h2><p>{detail.jobNumber} · {detail.engineer}</p></div><button className="settings-outline" aria-label="Close visit details" onClick={() => setSelected(null)}>×</button></header><div className="jobs-drawer-body"><section className="erp-form-section"><h3>Customer & Site</h3><p>{detail.customer} · {siteById(detail.siteId)?.name}</p><p>{prettyDate(detail.plannedDate)} · {label12h(detail.plannedStart)}–{label12h(detail.plannedEnd)}</p><p>{detail.visitStatus} · {detail.outcome ?? detail.jobStatus}</p></section>{visitAttention(detail, store).length > 0 && <section className="erp-form-section"><h3>Needs review</h3>{visitAttention(detail, store).map((issue) => <p className="job-late" key={issue}>{issue}</p>)}</section>}<section className="erp-form-section"><h3>Recorded events</h3>{([["Check-in", detail.checkIn], ["Checkout", detail.checkOut]] as const).map(([label, event]) => <div className="jobs-visit-event" key={label}><b>{label}</b>{event ? <><p>{istStamp(event.at)} · {event.source}</p><p>Synced {istStamp(event.syncedAt)}</p><p>{event.locationCheck}</p>{event.location && <p>Coordinates {event.location.lat}, {event.location.lng} · Accuracy {event.location.accuracyM}m{event.siteDistanceM !== undefined ? ` · ${event.siteDistanceM}m from site` : ""}</p>}</> : <p className="erp-muted">{label === "Checkout" && detail.visitStatus === "On site" ? "Visit is ongoing." : "No event recorded."}</p>}</div>)}</section></div><footer><button className="erp-action" onClick={() => { setSelected(null); openJob(detail.jobId); }}>Open {detail.jobNumber}</button></footer></section></Overlay>}
   </>;
+}
+
+/* ─── Schedule board — engineers × days, with an unassigned-jobs queue ── */
+function dayCapacityFor(store: ReturnType<typeof useErpStore>, engineerName: string, day: string) {
+  const blocked = blockedOn(store.leaves, store.holidays, engineerName, day);
+  const visits = visitsOn(store.jobs, day).filter((row) => row.engineer === engineerName && row.visitStatus !== "Cancelled");
+  const bookedMinutes = visits.reduce((sum, row) => sum + Math.max(0, timeToMinutes(row.plannedEnd) - timeToMinutes(row.plannedStart)), 0);
+  const workMinutes = Math.max(0, timeToMinutes(ATTENDANCE_SETTINGS.workEnd) - timeToMinutes(ATTENDANCE_SETTINGS.workStart));
+  const freeMinutes = Math.max(0, workMinutes - bookedMinutes);
+  const sorted = [...visits].sort((a, b) => timeToMinutes(a.plannedStart) - timeToMinutes(b.plannedStart));
+  const overlap = sorted.some((row, index) => index > 0 && timeToMinutes(row.plannedStart) < timeToMinutes(sorted[index - 1].plannedEnd));
+  return { blocked, visits, bookedMinutes, freeMinutes, overlap };
+}
+
+function ScheduleBoard({ store, openJob, flash }: { store: ReturnType<typeof useErpStore>; openJob: (id: string) => void; flash: (message: string) => void }) {
+  const [viewMode, setViewMode] = useState<"day" | "week">("week");
+  const [anchor, setAnchor] = useState(dateIso());
+  const [city, setCity] = useState("All cities");
+  const [engineerFilter, setEngineerFilter] = useState("All engineers");
+  const [queueOpen, setQueueOpen] = useState(false);
+  const [assignId, setAssignId] = useState<string | null>(null);
+  const days = viewMode === "week" ? Array.from({ length: 6 }, (_, index) => addDaysIso(weekStart(anchor), index)) : [anchor];
+  const unassigned = store.jobs.filter((job) => job.status === "Unassigned" && (city === "All cities" || siteById(job.siteId)?.city === city));
+  const visibleEngineers = engineers.filter((engineer) => engineerFilter === "All engineers" || engineer.name === engineerFilter);
+  const assignJob = store.jobs.find((job) => job.id === assignId);
+  return <div className="board-wrap jobs-board">
+    <div className="board-toolbar"><div className="board-week"><div className="job-view-toggle"><button className={viewMode === "day" ? "is-active" : ""} onClick={() => setViewMode("day")}>Day</button><button className={viewMode === "week" ? "is-active" : ""} onClick={() => setViewMode("week")}>Week</button></div><button className="settings-outline" aria-label="Previous date range" onClick={() => setAnchor(addDaysIso(anchor, viewMode === "week" ? -7 : -1))}>←</button><b>{viewMode === "week" ? `${shortDay(days[0])} – ${shortDay(days[5])}` : prettyDate(anchor)}</b><button className="settings-outline" aria-label="Next date range" onClick={() => setAnchor(addDaysIso(anchor, viewMode === "week" ? 7 : 1))}>→</button><button className="settings-outline" onClick={() => setAnchor(dateIso())}>Today</button></div><button className="settings-outline" aria-expanded={queueOpen} onClick={() => setQueueOpen(!queueOpen)}>{queueOpen ? "Hide" : "Show"} Unassigned Jobs ({unassigned.length})</button></div>
+    <div className="erp-filters jobs-filters"><label><span>Engineer</span><select value={engineerFilter} onChange={(event) => setEngineerFilter(event.target.value)}><option>All engineers</option>{engineers.map((engineer) => <option key={engineer.name}>{engineer.name}</option>)}</select></label><label><span>Site city</span><select value={city} onChange={(event) => setCity(event.target.value)}><option>All cities</option>{CITIES.map((value) => <option key={value}>{value}</option>)}</select></label>{(engineerFilter !== "All engineers" || city !== "All cities") && <button className="erp-record-link" onClick={() => { setEngineerFilter("All engineers"); setCity("All cities"); }}>Clear all</button>}</div>
+    <div className={`board-layout${queueOpen ? "" : " jobs-queue-collapsed"}`}>
+      {queueOpen && <aside className="board-queue"><h3>Unassigned Jobs <span>{unassigned.length}</span></h3>{unassigned.map((job) => <div key={job.id} className="board-chip is-queued"><button className="erp-record-link" onClick={() => openJob(job.id)}>{job.number}</button><b>{job.customer}</b><span>{siteById(job.siteId)?.name} · {siteById(job.siteId)?.city}</span><small>{job.type} · {job.hours}h{job.requiredDate ? ` · Required ${prettyDate(job.requiredDate)}` : ""}</small><button className="erp-record-link" onClick={() => setAssignId(job.id)}>Assign</button></div>)}{!unassigned.length && <p>No unassigned jobs.</p>}</aside>}
+      <div className="board-grid-wrap" tabIndex={0} aria-label="Engineer schedule, scroll for all days"><div className="board-grid" style={{ gridTemplateColumns: `150px repeat(${days.length}, minmax(195px, 1fr))` }}><div className="board-corner">Engineer</div>{days.map((day) => <div key={day} className={`board-day${day === dateIso() ? " is-today" : ""}`}>{shortDay(day)}{store.holidays.some((holiday) => holiday.date === day) && <small>Holiday</small>}</div>)}{visibleEngineers.map((engineer) => <Fragment key={engineer.name}><div className="board-engineer"><b>{engineer.name}</b><span>{engineer.base}</span></div>{days.map((day) => {
+        const cap = dayCapacityFor(store, engineer.name, day);
+        const visits = cap.visits.filter((row) => city === "All cities" || siteById(row.siteId)?.city === city);
+        const off = Boolean(cap.blocked && !cap.blocked.halfDay);
+        return <div key={day} className={`board-cell board-cell--${off ? "off" : cap.overlap ? "over" : cap.freeMinutes <= 0 ? "full" : "ok"}`}>
+          <span className="board-load">{hoursLabel(cap.bookedMinutes)} booked · {hoursLabel(cap.freeMinutes)} free</span>{cap.blocked && <span className="board-off">{cap.blocked.reason}{visits.length ? " · Assignment needs review" : ""}</span>}{cap.overlap && <small className="job-late">Schedule overlap</small>}{visits.map((row) => <button key={row.jobId} className={`board-chip board-chip--${row.jobType.toLowerCase().split(" ")[0]}`} onClick={() => openJob(row.jobId)}><b>{row.customer}</b><span>{siteById(row.siteId)?.name}</span><small className="board-slot">{label12h(row.plannedStart)}–{label12h(row.plannedEnd)}</small><small>{row.jobType}</small>{!sameCity(engineer.base, siteById(row.siteId)?.city) && <small className="job-late">Travel review · {siteById(row.siteId)?.city}</small>}</button>)}
+        </div>;
+      })}</Fragment>)}</div></div>
+    </div>
+    {assignJob && <AssignEngineer job={assignJob} close={() => setAssignId(null)} flash={flash} />}
+  </div>;
 }
 
 function EngineerToday({ jobs, openJob }: { jobs: Job[]; openJob: (id: string) => void }) {

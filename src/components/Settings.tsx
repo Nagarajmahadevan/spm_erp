@@ -18,6 +18,19 @@ const configs: Record<Section, { description: string; rows: Row[]; importable?: 
   "Manual Check-in/Checkout": { description: "Manually log a site or office check-in/checkout for an engineer, and reset the sample data.", rows: [] },
 };
 
+const TEMPLATE_HEADERS: Partial<Record<Section, string[]>> = {
+  "Items & Categories": ["Name", "Parent Category", "Tracking Type", "Status"],
+  "Vendors": ["Name", "Contact", "City", "State", "TDS Section", "TDS Rate"],
+};
+function downloadCsvTemplate(section: Section) {
+  const headers = TEMPLATE_HEADERS[section] ?? ["Name", "Detail", "Status"];
+  const blob = new Blob([headers.join(",")], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url; link.download = `${section.toLowerCase().replace(/[^a-z]+/g, "-")}-template.csv`; document.body.appendChild(link); link.click(); document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
 const ALL_SECTIONS = Object.keys(configs) as Section[];
 const modules = ["Dashboard", "Attendance", "Expenses", "Leads", "Quotations", "Orders", "Purchases", "Rentals", "Customers", "Invoices", "Stock", "Accounts", "Reports", "Settings"];
 const approveModules = new Set(["Quotations", "Purchases", "Expenses"]);
@@ -47,7 +60,7 @@ export default function Settings() {
         <div className="settings-workspace-head"><div><h2>{section}</h2><p>{config.description}</p></div>{listMode && <button className="erp-action" onClick={() => setDrawer("new")}>+ Add {section === "Users & Roles" ? "user" : section.slice(0, -1)}</button>}</div>
         {section === "Users & Roles" && <div className="settings-tabs"><button className={userTab === "Users" ? "is-active" : ""} onClick={() => setUserTab("Users")}>Users</button><button className={userTab === "Roles" ? "is-active" : ""} onClick={() => setUserTab("Roles")}>Roles</button></div>}
         {section === "Company" ? <CompanyForm onSave={() => notify("Company settings saved")} /> : section === "Alerts" ? <AlertsForm onSave={() => notify("Alert preferences saved")} /> : section === "Manual Check-in/Checkout" ? <ManualCheckInSection /> : section === "Tally" ? <TallyForm onSave={() => notify("Tally export settings saved")} /> : section === "Master Instruments" ? <MasterInstrumentsSection /> : section === "Users & Roles" && userTab === "Roles" ? <RolePermissions onSave={() => notify("Role permissions saved")} /> : <>
-          <div className="settings-toolbar"><div className="settings-list-search"><span>⌕</span><input aria-label={`Search ${title}`} value={query} onChange={(e) => setQuery(e.target.value)} placeholder={`Search ${title.toLowerCase()}…`} /></div><span className="settings-count">{rows.length} records</span><select aria-label="Record status filter" value={filter} onChange={(e) => setFilter(e.target.value)}><option>Active</option><option>Inactive</option><option>All</option></select>{config.importable && <><button className="settings-link" onClick={() => notify("CSV template downloaded")}>Download template</button><button className="settings-link" onClick={() => notify("Choose a CSV file to import")}>Import CSV</button></>}</div>
+          <div className="settings-toolbar"><div className="settings-list-search"><span>⌕</span><input aria-label={`Search ${title}`} value={query} onChange={(e) => setQuery(e.target.value)} placeholder={`Search ${title.toLowerCase()}…`} /></div><span className="settings-count">{rows.length} records</span><select aria-label="Record status filter" value={filter} onChange={(e) => setFilter(e.target.value)}><option>Active</option><option>Inactive</option><option>All</option></select>{config.importable && <button className="settings-link" onClick={() => downloadCsvTemplate(section)}>Download template</button>}</div>
           <div className="settings-list">{rows.map((row) => <button key={row.name} onClick={() => setDrawer(row)} className="settings-row"><span className="settings-row-avatar">{row.name.slice(0, 1)}</span><span><b>{row.name}</b><small>{row.detail}</small></span><em className={row.status === "Inactive" ? "is-inactive" : ""}>{row.status}</em><span className="settings-row-arrow">›</span></button>)}</div>
         </>}
       </div>
@@ -75,7 +88,7 @@ function Drawer({ section, record, close, save }: { section: Section; record?: R
   const attemptClose = () => { if (!dirty || window.confirm("Discard unsaved changes?")) close(); };
   return <aside className="settings-drawer" aria-label="Edit record"><div className="settings-drawer-head"><div><p>{section}</p><div className="drawer-title-row"><h2>{record?.name ?? `Add ${section === "Users & Roles" ? "user" : section.slice(0, -1)}`}</h2></div></div><button onClick={attemptClose}>×</button></div>
     <FormShell onDirtyChange={setDirty} onSave={() => save("Record saved")}>
-      {section === "Users & Roles" ? <><Field label="Full name" value={record?.values?.["Full name"]} /><Field label="Email" type="email" value={record?.values?.Email} /><Field label="Phone" value={record?.values?.Phone} /><Field label="Role" value={record?.values?.Role} options={["Admin", "Office", "Engineer"]} /><Toggle label="Active" defaultChecked={record?.status !== "Inactive"} /><div className="settings-inline-actions"><button type="button">Resend invite</button><button type="button">Reset password</button></div></> : <RecordFields section={section} />}
+      {section === "Users & Roles" ? <><Field label="Full name" value={record?.values?.["Full name"]} /><Field label="Email" type="email" value={record?.values?.Email} /><Field label="Phone" value={record?.values?.Phone} /><Field label="Role" value={record?.values?.Role} options={["Admin", "Office", "Engineer"]} /><Toggle label="Active" defaultChecked={record?.status !== "Inactive"} /></> : <RecordFields section={section} />}
       <Submit />
     </FormShell>
   </aside>;

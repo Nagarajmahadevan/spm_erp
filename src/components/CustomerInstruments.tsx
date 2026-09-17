@@ -258,7 +258,7 @@ function InstrumentForm({ instrument, customer, all, close, save }: { instrument
 }
 
 type ImportRow = { name: string; make: string; model: string; serial: string; department: string; lastCalibrated: string; intervalMonths?: number; errors: string[] };
-function parseCsv(text: string): string[][] {
+export function parseCsv(text: string): string[][] {
   const rows: string[][] = [];
   let row: string[] = [], value = "", quoted = false;
   for (let i = 0; i < text.length; i++) {

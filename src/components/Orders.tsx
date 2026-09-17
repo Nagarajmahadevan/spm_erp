@@ -3,12 +3,12 @@ import { COMPANY, customerSites, dateIso, money, prettyDate, stamp, totalsFor } 
 import { dispatchSaleOrder, invoicePaymentStatus, updateStore, useErpStore, type CustomerOrderStatus, type Job } from "./erpStore";
 import { invoiceFromOrder, nextNumber as nextInvoiceNumber } from "./Invoices";
 
-export default function Orders({ openJob, openInvoice, newJob, openRentals }: { openJob?: (jobId: string) => void; openInvoice?: (invoiceId: string) => void; newJob?: (prefill: Partial<Job>) => void; openRentals?: () => void } = {}) {
+export default function Orders({ focusOrder, openJob, openInvoice, newJob, openRentals }: { focusOrder?: string; openJob?: (jobId: string) => void; openInvoice?: (invoiceId: string) => void; newJob?: (prefill: Partial<Job>) => void; openRentals?: () => void } = {}) {
   const store = useErpStore();
   const { customerOrders } = store;
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("All statuses");
-  const [editorId, setEditorId] = useState<string | null>(null);
+  const [editorId, setEditorId] = useState<string | null>(focusOrder ?? null);
   const [toast, setToast] = useState("");
   const flash = (message: string) => { setToast(message); window.setTimeout(() => setToast(""), 2800); };
 

@@ -1,9 +1,23 @@
 import { useEffect, useMemo, useState } from "react";
-import { COMPANY, money, totalsFor, type Quote } from "./erpMasters";
+import { COMPANY, dateIso, money, totalsFor, type Quote } from "./erpMasters";
 import { updateStore, useErpStore, type Lead, type LeadActivity as Activity, type LeadSource as Source, type LeadStage as Stage } from "./erpStore";
 import { blankQuote, displayNumber as displayQuoteNumber, nextNumber as nextQuoteNumber, statusFor as quoteStatusFor } from "./Quotations";
+import { parseCsv } from "./CustomerInstruments";
+import { Overlay } from "./ErpUi";
 
 const stages: Stage[] = ["New", "Contacted", "Quoted", "Won", "Lost"];
+const sources: Source[] = ["Website", "Phone", "WhatsApp", "Email", "Referral"];
+
+function exportCsv(filename: string, headers: string[], rows: (string | number)[][]) {
+  const escape = (value: string | number) => { const text = String(value); return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text; };
+  const csv = [headers, ...rows].map((row) => row.map(escape).join(",")).join("\r\n");
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url; link.download = filename; document.body.appendChild(link); link.click(); document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+const nextLeadId = (leads: Lead[]) => `LD-${Math.max(1050, ...leads.map((lead) => Number(lead.id.split("-")[1]) || 0)) + 1}`;
 
 const stageClass = (stage: Stage) => stage.toLowerCase();
 const initials = (name: string) => name.split(" ").map((part) => part[0]).join("");
@@ -64,6 +78,7 @@ export default function Leads({ openQuote }: { openQuote?: (quoteId: string) => 
   const drawer = leads.find((lead) => lead.id === drawerId) ?? null;
   const [creating, setCreating] = useState(false);
   const [overflow, setOverflow] = useState(false);
+  const [importing, setImporting] = useState(false);
   const [toast, setToast] = useState("");
 
   const flash = (message: string) => {
@@ -88,6 +103,8 @@ export default function Leads({ openQuote }: { openQuote?: (quoteId: string) => 
       && isFollowUpMatch(lead.followUpAt, followUp)),
     [leads, search, stage, source, assigned, followUp],
   );
+  const exportLeads = () => exportCsv(`leads-${dateIso()}.csv`, ["Name", "Company", "Phone", "Email", "City", "Source", "Stage", "Enquiry"],
+    filtered.map((lead) => [lead.name, lead.company, lead.phone, lead.email, lead.city, lead.source, lead.stage, lead.enquiry]));
   const cards = [
     ["New this week", leads.filter((lead) => lead.stage === "New").length, "new"],
     ["Follow-ups due today", leads.filter((lead) => lead.followUpAt && dayDifference(lead.followUpAt) === 0).length, "today"],
@@ -97,11 +114,12 @@ export default function Leads({ openQuote }: { openQuote?: (quoteId: string) => 
   ] as const;
 
   return <section className="leads-page">
-    <div className="leads-heading"><div><p className="erp-secondary-text">Sales / Leads</p><h1>Leads</h1><p className="erp-secondary-text mt-1">Capture every enquiry. Never miss a follow-up.</p></div><div className="leads-actions"><button className="erp-action" onClick={() => setCreating(true)}>+ New lead</button><div className="leads-overflow"><button className="settings-outline" onClick={() => setOverflow((open) => !open)}>⋯</button>{overflow && <div><button onClick={() => flash("CSV import is ready")}>Import CSV</button><button onClick={() => flash("Leads exported")}>Export</button></div>}</div></div></div>
+    <div className="leads-heading"><div><p className="erp-secondary-text">Sales / Leads</p><h1>Leads</h1><p className="erp-secondary-text mt-1">Capture every enquiry. Never miss a follow-up.</p></div><div className="leads-actions"><button className="erp-action" onClick={() => setCreating(true)}>+ New lead</button><div className="leads-overflow"><button className="settings-outline" onClick={() => setOverflow((open) => !open)}>⋯</button>{overflow && <div><button onClick={() => { setOverflow(false); setImporting(true); }}>Import CSV</button><button onClick={() => { setOverflow(false); exportLeads(); }}>Export</button></div>}</div></div></div>
     <div className="leads-overview">{cards.map(([label, value, tone]) => <button key={label} className={`leads-stat leads-stat--${tone}`} onClick={() => setFollowUp(label.includes("Overdue") ? "Overdue" : label.includes("today") ? "Today" : "All follow-ups")}><span>{label}</span><b>{value}</b></button>)}</div>
     <div className="leads-toolbar"><div className="settings-list-search"><span>⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search leads" /></div><select value={stage} onChange={(event) => setStage(event.target.value)}><option>All stages</option>{stages.map((item) => <option key={item}>{item}</option>)}</select><select value={source} onChange={(event) => setSource(event.target.value)}><option>All sources</option>{["Website", "Phone", "WhatsApp", "Email", "Referral"].map((item) => <option key={item}>{item}</option>)}</select><select value={assigned} onChange={(event) => setAssigned(event.target.value)}><option>Everyone</option><option>Arun Kumar</option><option>Priya Shah</option></select><select value={followUp} onChange={(event) => setFollowUp(event.target.value)}><option>All follow-ups</option><option>Today</option><option>This week</option><option>Overdue</option></select></div>
     <div className="leads-table-wrap"><table className="leads-table"><thead><tr><th>Name & company</th><th>Source</th><th>Enquiry</th><th>Stage</th><th>Next follow-up</th><th>Assigned to</th></tr></thead><tbody>{filtered.map((lead) => { const label = followUpLabel(lead.followUpAt); return <tr key={lead.id} onClick={() => setDrawerId(lead.id)}><td><b>{lead.name}</b><small>{lead.company} {lead.auto && <em className="lead-auto">Auto-captured</em>}</small></td><td><span className="lead-source">{lead.source}</span></td><td className="lead-enquiry">{lead.enquiry}</td><td><span className={`lead-stage lead-stage--${stageClass(lead.stage)}`}>{lead.stage}</span></td><td className={label.startsWith("Overdue") ? "lead-overdue" : ""}>{label}</td><td><span className="lead-assignee"><i>{initials(lead.assigned)}</i>{lead.assigned}</span></td></tr>; })}</tbody></table>{!filtered.length && <div className="settings-empty"><b>No leads match these filters</b><p>Clear a filter or add a new enquiry to get started.</p><button className="erp-action" onClick={() => setCreating(true)}>+ New lead</button></div>}</div>
     {creating && <NewLead leads={leads} close={() => setCreating(false)} create={addLead} />}
+    {importing && <ImportLeadsCsv leads={leads} close={() => setImporting(false)} done={(count) => { setImporting(false); flash(`${count} lead${count === 1 ? "" : "s"} imported.`); }} />}
     {drawer && <LeadDrawer lead={drawer} quotes={quotes} close={() => setDrawerId(null)} update={updateLead} flash={flash} openQuote={openQuote} />}
     {toast && <div className="settings-toast" role="status">✓ {toast}</div>}
   </section>;
@@ -114,6 +132,57 @@ function NewLead({ leads, close, create }: { leads: Lead[]; close: () => void; c
   const submit = () => create({ id: `LD-${1050 + leads.length}`, name: form.name.trim(), company: form.company.trim(), phone: form.phone.trim(), email: form.email.trim(), city: "—", source: form.source, enquiry: form.need, stage: "New", followUpAt: `${form.date}T10:00`, assigned: form.assigned, activities: [{ title: "Phone enquiry captured", meta: "Just now · Arun Kumar" }, { title: `Follow-up set for ${form.date}`, meta: "Just now · Arun Kumar" }] });
 
   return <div className="stock-modal-backdrop"><section className="stock-move-modal lead-new-modal" role="dialog" aria-modal="true" aria-labelledby="new-lead-title"><button className="stock-modal-close" onClick={close}>×</button><p>Sales / Leads</p><h2 id="new-lead-title">New lead</h2><p className="lead-form-intro">A quick capture now keeps the follow-up from slipping away.</p><form className="settings-form" onSubmit={(event) => { event.preventDefault(); submit(); }}><label><span>Name</span><input value={form.name} onChange={(event) => change("name", event.target.value)} autoFocus required /></label><label><span>Company</span><input value={form.company} onChange={(event) => change("company", event.target.value)} /></label><label><span>Phone <b className="lead-required">Required</b></span><input value={form.phone} onChange={(event) => change("phone", event.target.value)} inputMode="tel" required /></label><label><span>Email <em className="lead-optional">Optional</em></span><input value={form.email} onChange={(event) => change("email", event.target.value)} type="email" /></label>{duplicate && <div className="lead-duplicate">This looks like an existing lead: <button type="button" onClick={close}>View {duplicate.name}</button> · <button type="button" onClick={close}>Add a note there</button></div>}<label><span>Source</span><select value={form.source} onChange={(event) => change("source", event.target.value)}>{["Website", "Phone", "WhatsApp", "Email", "Referral"].map((item) => <option key={item}>{item}</option>)}</select></label><label><span>Assigned to</span><select value={form.assigned} onChange={(event) => change("assigned", event.target.value)}><option>Arun Kumar</option><option>Priya Shah</option></select></label><label className="lead-form-wide"><span>What they need</span><textarea value={form.need} onChange={(event) => change("need", event.target.value)} /></label><label><span>Next follow-up date <b className="lead-required">Required</b></span><input value={form.date} onChange={(event) => change("date", event.target.value)} type="date" required /></label><button className="erp-action" type="submit" disabled={!form.name.trim() || !form.phone.trim() || !form.date}>Create lead</button></form></section></div>;
+}
+
+type ImportLeadRow = { name: string; company: string; phone: string; email: string; city: string; source: Source; enquiry: string; errors: string[] };
+function ImportLeadsCsv({ leads, close, done }: { leads: Lead[]; close: () => void; done: (count: number) => void }) {
+  const [rows, setRows] = useState<ImportLeadRow[] | null>(null);
+  const [error, setError] = useState("");
+  const clean = rows?.filter((row) => !row.errors.length) ?? [];
+  const chooseFile = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setError(""); setRows(null);
+    try {
+      const parsed = parseCsv((await file.text()).replace(/^﻿/, ""));
+      const headers = parsed.shift()?.map((header) => header.toLowerCase().replace(/[^a-z]/g, "")) ?? [];
+      const nameIndex = headers.findIndex((header) => ["name", "leadname"].includes(header));
+      if (nameIndex < 0 || !parsed.length) throw new Error("Include a Name column and at least one data row.");
+      const get = (row: string[], keys: string[]) => row[headers.findIndex((header) => keys.includes(header))] ?? "";
+      const seen = new Set<string>();
+      setRows(parsed.map((values) => {
+        const sourceRaw = get(values, ["source"]);
+        const source = sources.find((item) => item.toLowerCase() === sourceRaw.toLowerCase()) ?? "Phone";
+        const row: ImportLeadRow = { name: values[nameIndex] ?? "", company: get(values, ["company"]), phone: get(values, ["phone"]), email: get(values, ["email"]), city: get(values, ["city"]), source, enquiry: get(values, ["enquiry", "need"]), errors: [] };
+        if (!row.name) row.errors.push("Name required");
+        if (!row.phone && !row.email) row.errors.push("Phone or email required");
+        const duplicateKey = row.phone ? `phone:${row.phone}` : `email:${row.email.toLowerCase()}`;
+        if (seen.has(duplicateKey) || leads.some((lead) => (row.phone && lead.phone === row.phone) || (row.email && lead.email.toLowerCase() === row.email.toLowerCase()))) row.errors.push("Possible duplicate");
+        seen.add(duplicateKey);
+        return row;
+      }));
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "The CSV could not be read."); }
+  };
+  const confirm = () => {
+    if (!clean.length) { setError("Choose a CSV with at least one valid lead."); return; }
+    updateStore((current) => {
+      const created = clean.map((row, index): Lead => ({
+        id: `LD-${Math.max(1050, ...current.leads.map((lead) => Number(lead.id.split("-")[1]) || 0)) + index + 1}`,
+        name: row.name, company: row.company, phone: row.phone, email: row.email, city: row.city || "—", source: row.source, enquiry: row.enquiry, stage: "New", assigned: "Arun Kumar",
+        activities: [{ title: `${row.source} enquiry captured (imported)`, meta: timestamp() }],
+      }));
+      return { leads: [...created, ...current.leads] };
+    });
+    done(clean.length);
+  };
+  return <Overlay onClose={close} label="Import leads"><section className="stock-move-modal ci-import-modal ci-scroll-modal">
+    <header className="ci-modal-heading"><h2>Import leads</h2><button onClick={close} aria-label="Close import">×</button></header>
+    <div className="ci-modal-body"><p className="ci-form-helper">Choose a CSV to preview before importing.</p>
+      <label className="quote-grid-wide"><span>CSV file</span><input type="file" accept=".csv,text/csv" onChange={chooseFile} /></label>
+      <p className="ci-form-helper">Columns: Name, Company, Phone, Email, City, Source, Enquiry.</p>
+      {rows && <><p className="ci-form-helper"><b>{clean.length} ready to import</b> · {rows.length - clean.length} need review and will be skipped</p><div className="erp-table-shell ci-import-preview"><table className="erp-data-table"><thead><tr><th>Name</th><th>Company</th><th>Contact</th><th>Review</th></tr></thead><tbody>{rows.map((row, index) => <tr key={index}><td>{row.name || "Missing name"}</td><td>{row.company || "—"}</td><td>{row.phone || row.email || "—"}</td><td>{row.errors.join("; ") || "Ready"}</td></tr>)}</tbody></table></div></>}
+    </div><footer className="ci-modal-footer">{error && <p className="stock-count-error" role="alert">{error}</p>}<div><button className="settings-outline" onClick={close}>Cancel</button><button className="erp-action" onClick={confirm}>Import {clean.length || ""} lead{clean.length === 1 ? "" : "s"}</button></div></footer>
+  </section></Overlay>;
 }
 
 function LeadDrawer({ lead, quotes, close, update, flash, openQuote }: { lead: Lead; quotes: Quote[]; close: () => void; update: (id: string, patch: Partial<Lead>, message?: string) => void; flash: (message: string) => void; openQuote?: (quoteId: string) => void }) {

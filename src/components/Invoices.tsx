@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import spmLogo from "@/imports/SPM_Logo.png";
-import { COMPANY, INDIAN_STATES, addMonths, siteById, stockCatalog, money, stamp, dateIso, dayDifference, prettyDate, lineValue, totalsFor, numberWords, type Customer, type Quote } from "./erpMasters";
+import { COMPANY, INDIAN_STATES, addMonths, customerSites, siteById, stockCatalog, money, stamp, dateIso, dayDifference, prettyDate, lineValue, totalsFor, numberWords, type Customer, type Quote } from "./erpMasters";
 import { balanceOf, billingStatusOf, invoicePaymentStatus, invoiceReceiptsApplied, invoiceStatusFor as statusFor, invoiceTdsRecorded, invoiceTotals, rentalNextInvoiceDate, updateStore, useErpStore, type CustomerInstrument, type CustomerOrder, type Individual, type Invoice, type InvoiceDisplayStatus as DisplayStatus, type InvoiceLine, type InvoiceActivity, type Job, type Rental } from "./erpStore";
 import { RecordReceipt } from "./Accounts";
 
@@ -275,6 +275,11 @@ function InvoiceEditor({ invoice, store, close, persist, duplicate, flash }: { i
   const collecting = doc.status === "Sent" && payStatus !== "Paid";
   const localTax = doc.customerState === COMPANY.state; const totals = invoiceTotals(doc); const balance = balanceOf(doc, customerReceipts, customerTds);
   const received = invoiceReceiptsApplied(doc.id, customerReceipts); const tdsRecorded = invoiceTdsRecorded(doc.id, customerTds);
+  const shareOnWhatsApp = () => {
+    const phone = customerSites.find((site) => site.customer === doc.customer)?.phone.replace(/\D/g, "");
+    if (!phone) { flash("No phone number on file for this customer."); return; }
+    window.open(`https://wa.me/${phone}?text=${encodeURIComponent(`${doc.number} — ${money(totals.grandTotal)}, due ${prettyDate(doc.dueDate)}.`)}`, "_blank", "noopener,noreferrer");
+  };
 
   const change = <K extends keyof Invoice>(key: K, value: Invoice[K]) => setDoc({ ...doc, [key]: value });
   const chooseCustomer = (name: string) => {
@@ -323,7 +328,7 @@ function InvoiceEditor({ invoice, store, close, persist, duplicate, flash }: { i
         <button className="settings-outline" onClick={() => flash(`Reminder sent to ${doc.contact || doc.customer}`)}>Send reminder</button>
         <button className="settings-outline" onClick={() => setPreview(true)}>Preview</button>
         <div className="quote-action-anchor"><button className="settings-outline quote-overflow-button" onClick={() => setOverflow(!overflow)} aria-label="More actions">⋯</button>
-          {overflow && <div className="quote-overflow-menu"><button onClick={() => { setOverflow(false); flash("WhatsApp message ready to share"); }}>Share on WhatsApp</button><button onClick={() => { setOverflow(false); flash("Credit note draft created"); }}>Credit note</button><button className="is-danger" onClick={cancel}>Cancel</button></div>}
+          {overflow && <div className="quote-overflow-menu"><button onClick={() => { setOverflow(false); shareOnWhatsApp(); }}>Share on WhatsApp</button><button className="is-danger" onClick={cancel}>Cancel</button></div>}
         </div>
       </>}
       {doc.status === "Sent" && payStatus === "Paid" && <><button className="settings-outline" onClick={() => setPreview(true)}>Preview</button><button className="settings-outline" onClick={() => duplicate(doc)}>Duplicate</button></>}
@@ -426,7 +431,7 @@ function InvoiceEditor({ invoice, store, close, persist, duplicate, flash }: { i
       </section>
     </main>
 
-    {collecting && <div className="invoice-mobile-bar"><button className="erp-action" onClick={() => setPaying(true)}>Record Receipt</button><button className="settings-outline" onClick={() => flash("WhatsApp message ready to share")}>Share on WhatsApp</button></div>}
+    {collecting && <div className="invoice-mobile-bar"><button className="erp-action" onClick={() => setPaying(true)}>Record Receipt</button><button className="settings-outline" onClick={shareOnWhatsApp}>Share on WhatsApp</button></div>}
 
     {paying && <RecordReceipt store={store} customer={doc.customer} presetInvoiceId={doc.id} close={() => setPaying(false)} flash={flash} />}
     {preview && <InvoicePreview invoice={doc} totals={totals} localTax={localTax} close={() => setPreview(false)} />}

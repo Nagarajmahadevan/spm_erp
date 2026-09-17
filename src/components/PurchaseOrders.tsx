@@ -186,6 +186,11 @@ function POEditor({ order, close, persist, duplicate, flash, quantities, individ
   const stillToCome = doc.items.reduce((total, line) => total + pendingOf(line), 0);
   const collecting = doc.status === "Sent" || doc.status === "Partly received";
   const payable = payables.find((bill) => bill.poRef === doc.number);
+  const shareOnWhatsApp = () => {
+    const phone = vendorMaster.find((vendor) => vendor.name === doc.vendor)?.phone.replace(/\D/g, "");
+    if (!phone) { flash("No phone number on file for this vendor."); return; }
+    window.open(`https://wa.me/${phone}?text=${encodeURIComponent(`${doc.number} — ${money(totals.grandTotal)}, expected ${prettyDate(doc.expectedDate)}.`)}`, "_blank", "noopener,noreferrer");
+  };
 
   const change = <K extends keyof PurchaseOrder>(key: K, value: PurchaseOrder[K]) => setDoc({ ...doc, [key]: value });
   const chooseVendor = (name: string) => {
@@ -247,7 +252,7 @@ function POEditor({ order, close, persist, duplicate, flash, quantities, individ
         <button className="settings-outline" onClick={() => flash(`Reminder sent to ${doc.contact || doc.vendor}`)}>Send reminder</button>
         <button className="settings-outline" onClick={() => setPreview(true)}>Preview</button>
         <div className="quote-action-anchor"><button className="settings-outline quote-overflow-button" onClick={() => setOverflow(!overflow)} aria-label="More actions">⋯</button>
-          {overflow && <div className="quote-overflow-menu"><button onClick={() => { setOverflow(false); flash("WhatsApp message ready to share"); }}>Share on WhatsApp</button><button className="is-danger" onClick={cancel}>Cancel</button></div>}
+          {overflow && <div className="quote-overflow-menu"><button onClick={() => { setOverflow(false); shareOnWhatsApp(); }}>Share on WhatsApp</button><button className="is-danger" onClick={cancel}>Cancel</button></div>}
         </div>
       </>}
       {docStatus === "Received" && <>{!payable && <button className="erp-action" onClick={() => setBilling(true)}>Create vendor bill</button>}<button className="settings-outline" onClick={() => setPreview(true)}>Preview</button><button className="settings-outline" onClick={() => duplicate(doc)}>Duplicate</button></>}
@@ -355,7 +360,7 @@ function POEditor({ order, close, persist, duplicate, flash, quantities, individ
       </section>
     </main>
 
-    {collecting && <div className="invoice-mobile-bar po-mobile-bar"><button className="erp-action" onClick={() => setReceiving(true)}>Receive items</button><button className="settings-outline" onClick={() => flash("WhatsApp message ready to share")}>Share on WhatsApp</button></div>}
+    {collecting && <div className="invoice-mobile-bar po-mobile-bar"><button className="erp-action" onClick={() => setReceiving(true)}>Receive items</button><button className="settings-outline" onClick={shareOnWhatsApp}>Share on WhatsApp</button></div>}
 
     {receiving && <ReceiveItems order={doc} individuals={individuals} close={() => setReceiving(false)} save={applyReceipt} />}
     {billing && <VendorBillModal order={doc} totals={totals} close={() => setBilling(false)} save={createBill} />}

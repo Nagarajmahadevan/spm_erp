@@ -9,15 +9,16 @@ import Orders from "./Orders";
 import Invoices from "./Invoices";
 import PurchaseOrders from "./PurchaseOrders";
 import Rentals from "./Rentals";
-import DueDates, { dueSummary } from "./DueDates";
+import DueDates, { dueSummary, buildDueItems, whenLabel, type DueItem } from "./DueDates";
 import Customers from "./Customers";
 import Jobs from "./Jobs";
 import Attendance from "./Attendance";
 import AdvanceExpense from "./AdvanceExpense";
 import Accounts from "./Accounts";
 import Reports from "./Reports";
-import { useErpStore, type Job } from "./erpStore";
-import { money, prettyDate } from "./erpMasters";
+import { statusFor as quoteStatusFor } from "./Quotations";
+import { attendanceStatusFor, balanceOf, invoiceTotals, totalOf, useErpStore, type Job } from "./erpStore";
+import { dateIso, dayDifference, engineers, money, prettyDate, totalsFor, weekStart, addDaysIso, initials } from "./erpMasters";
 
 type Role = "Admin" | "Engineer";
 type IconName = "dashboard" | "attendance" | "expense" | "leads" | "quote" | "purchase" | "invoice" | "stock" | "due" | "accounts" | "reports" | "settings" | "search" | "bell" | "menu" | "chevron" | "more" | "arrow";
@@ -79,8 +80,12 @@ export default function Dashboard() {
   const [engineerFocus, setEngineerFocus] = useState<string | undefined>(undefined);
   const [quoteFocus, setQuoteFocus] = useState<string | undefined>(undefined);
   const [rentalFocus, setRentalFocus] = useState<string | undefined>(undefined);
+  const [customerFocus, setCustomerFocus] = useState<string | undefined>(undefined);
+  const [orderFocus, setOrderFocus] = useState<string | undefined>(undefined);
+  const [dueItemFocus, setDueItemFocus] = useState<string | undefined>(undefined);
   const [poAutoStartLow, setPoAutoStartLow] = useState(false);
   const [jobPrefill, setJobPrefill] = useState<Partial<Job> | undefined>(undefined);
+  const [searchOpen, setSearchOpen] = useState(false);
   const store = useErpStore();
   const due = dueSummary(store);
   const goToJob = (jobId: string) => { setJobFocus(jobId); setActive("Jobs"); };
@@ -91,9 +96,62 @@ export default function Dashboard() {
   const goToLowStockPO = () => { setPoAutoStartLow(true); setActive("Purchases"); };
   const goToRentals = (ref?: string) => { setRentalFocus(ref); setActive("Rentals"); };
   const goToNewJob = (prefill: Partial<Job>) => { setJobPrefill(prefill); setActive("Jobs"); };
+  const goToCustomer = (customerId: string) => { setCustomerFocus(customerId); setActive("Customers"); };
+  const goToOrder = (orderId: string) => { setOrderFocus(orderId); setActive("Orders"); };
+  const goToDueItem = (item: DueItem) => { setDueItemFocus(item.id); setActive("Due Dates"); };
   const visibleModules = useMemo(() => modules.filter(([name]) => role === "Admin" || engineerModules.has(name)), [role]);
   const groups = [...new Set(visibleModules.map(([, , group]) => group))];
   const toggleRole = () => { const next = role === "Admin" ? "Engineer" : "Admin"; setRole(next); setActive(next === "Engineer" ? "Jobs" : "Dashboard"); };
+
+  // Real dashboard figures — computed from the store, not hardcoded.
+  const openQuotes = store.quotes.filter((quote) => quoteStatusFor(quote) === "Draft" || quoteStatusFor(quote) === "Sent");
+  const openQuotesValue = openQuotes.reduce((sum, quote) => sum + totalsFor(quote.items, quote.customerState === "Karnataka", quote.overallDiscount ?? 0, quote.freightCharges ?? 0).grandTotal, 0);
+  const pendingInvoices = store.invoices.filter((invoice) => invoice.status === "Sent" && balanceOf(invoice, store.customerReceipts, store.customerTds) > 0);
+  const pendingInvoicesValue = pendingInvoices.reduce((sum, invoice) => sum + balanceOf(invoice, store.customerReceipts, store.customerTds), 0);
+  const lowStockItems = store.quantities.filter((item) => totalOf(item) < item.minimum);
+  const allDueItems = buildDueItems(store);
+  const dueThisWeek = allDueItems.filter((item) => dayDifference(item.date) >= 0 && dayDifference(item.date) <= 7);
+
+  type DashboardAlert = { id: string; title: string; detail: string; tone: "rose" | "amber"; onOpen: () => void };
+  const dueAlert = (item: DueItem): DashboardAlert => { const when = whenLabel(item.date); return {
+    id: item.id, title: item.title, detail: [item.party, item.amount ? money(item.amount) : null, when.text].filter(Boolean).join(" · "),
+    tone: when.tone === "late" ? "rose" : "amber", onOpen: () => goToDueItem(item),
+  }; };
+  const overdueAlerts = due.overdue.map(dueAlert);
+  const dueTodayAlerts = due.dueToday.map(dueAlert);
+  const lowStockAlerts: DashboardAlert[] = lowStockItems.map((item) => ({
+    id: `low-${item.id}`, title: `${item.name} — low stock`, detail: `${totalOf(item)} of ${item.minimum} minimum · ${item.category}`,
+    tone: "amber", onOpen: () => goToStockItem(item.id),
+  }));
+  const allAlerts = [...overdueAlerts, ...dueTodayAlerts, ...lowStockAlerts];
+  const todaysPriorities = allAlerts.slice(0, 3);
+  const attentionAlerts = allAlerts.slice(0, 4);
+
+  // Collections by week — last five weeks of real customer receipts.
+  const thisWeekStart = weekStart(dateIso());
+  const weekBuckets = Array.from({ length: 5 }, (_, index) => addDaysIso(thisWeekStart, -7 * (4 - index)));
+  const weeklyCollections = weekBuckets.map((start) => store.customerReceipts.filter((receipt) => weekStart(receipt.date) === start).reduce((sum, receipt) => sum + receipt.amount, 0));
+  const collectionsTotal = weeklyCollections.reduce((sum, value) => sum + value, 0);
+  const maxWeekly = Math.max(1, ...weeklyCollections);
+
+  // Who's in today — real attendance status per engineer.
+  const presentToday = engineers.filter((engineer) => attendanceStatusFor(store.attendance, store.leaves, store.holidays, engineer.name, dateIso()) === "Present");
+
+  // Global search — customers, orders, invoices, jobs and stock, matched by name/number/id.
+  type SearchHit = { group: string; label: string; sublabel: string; onOpen: () => void };
+  const searchHits: SearchHit[] = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    if (!query) return [];
+    const hits: SearchHit[] = [];
+    store.customers.filter((customer) => customer.name.toLowerCase().includes(query)).slice(0, 5).forEach((customer) => hits.push({ group: "Customers", label: customer.name, sublabel: customer.city, onOpen: () => goToCustomer(customer.id) }));
+    store.customerOrders.filter((order) => `${order.number} ${order.customer}`.toLowerCase().includes(query)).slice(0, 5).forEach((order) => hits.push({ group: "Orders", label: order.number, sublabel: order.customer, onOpen: () => goToOrder(order.id) }));
+    store.invoices.filter((invoice) => `${invoice.number} ${invoice.customer}`.toLowerCase().includes(query)).slice(0, 5).forEach((invoice) => hits.push({ group: "Invoices", label: invoice.number, sublabel: `${invoice.customer} · ${money(invoiceTotals(invoice).grandTotal)}`, onOpen: () => goToInvoice(invoice.id) }));
+    store.jobs.filter((job) => `${job.number} ${job.customer}`.toLowerCase().includes(query)).slice(0, 5).forEach((job) => hits.push({ group: "Jobs", label: job.number, sublabel: `${job.customer} · ${job.status}`, onOpen: () => goToJob(job.id) }));
+    store.individuals.filter((item) => `${item.id} ${item.name}`.toLowerCase().includes(query)).slice(0, 5).forEach((item) => hits.push({ group: "Stock", label: item.id, sublabel: item.name, onOpen: () => goToStockItem(item.id) }));
+    store.quantities.filter((item) => `${item.id} ${item.name}`.toLowerCase().includes(query)).slice(0, 5).forEach((item) => hits.push({ group: "Stock", label: item.id, sublabel: item.name, onOpen: () => goToStockItem(item.id) }));
+    return hits;
+  }, [search, store]);
+  const openSearchHit = (hit: SearchHit) => { hit.onOpen(); setSearch(""); setSearchOpen(false); };
 
   return <div className="erp-app min-h-screen bg-[#f4f6f8] text-[#2a3442]">
     <aside className={`erp-sidebar ${collapsed ? "erp-sidebar--collapsed" : ""}`}>
@@ -121,21 +179,32 @@ export default function Dashboard() {
 
     <div className={`erp-main ${collapsed ? "erp-main--wide" : ""}`}>
       <header className="erp-topbar">
-        <div className="erp-search"><Icon name="search" /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search records, invoices, stock…" aria-label="Global search" /><kbd>⌘ K</kbd></div>
+        <div className="relative">
+          <div className="erp-search"><Icon name="search" /><input value={search} onChange={(event) => { setSearch(event.target.value); setSearchOpen(true); }} onFocus={() => setSearchOpen(true)} onBlur={() => window.setTimeout(() => setSearchOpen(false), 150)} onKeyDown={(event) => { if (event.key === "Escape") { setSearch(""); setSearchOpen(false); } }} placeholder="Search customers, orders, invoices, jobs, stock…" aria-label="Global search" /><kbd>⌘ K</kbd></div>
+          {searchOpen && search.trim() && <div className="erp-popover">
+            <p className="mb-2 text-xs font-semibold text-[#3d4a5c]">Search results</p>
+            {searchHits.length ? searchHits.map((hit) => <button key={`${hit.group}-${hit.label}`} className="erp-alert" style={{ cursor: "pointer", width: "100%", textAlign: "left" }} onMouseDown={(event) => { event.preventDefault(); openSearchHit(hit); }}><div><b>{hit.label}</b><small>{hit.group} · {hit.sublabel}</small></div></button>) : <p>No matches</p>}
+          </div>}
+        </div>
         <div className="relative flex items-center gap-2">
           <button onClick={() => setAlertsOpen((value) => !value)} className="erp-icon-button relative" aria-label="Notifications"><Icon name="bell" />{due.badge > 0 && <span className="erp-alert-count">{due.badge}</span>}</button>
           {alertsOpen && <div className="erp-popover right-14"><p className="mb-2 text-xs font-semibold text-[#3d4a5c]">Notifications</p>{due.overdue.slice(0, 3).map((item) => <p key={item.id}>{item.title}</p>)}{!due.overdue.length && <p>Nothing overdue</p>}</div>}
         </div>
       </header>
       <main className="erp-content">
-        {active === "Settings" ? <Settings /> : active === "Stock" ? <Stock isEngineer={role === "Engineer"} focusItem={stockFocus} onCreatePO={goToLowStockPO} onOpenRental={goToRentals} /> : active === "Leads" ? <Leads openQuote={goToQuote} /> : active === "Quotations" ? <Quotations focusQuote={quoteFocus} /> : active === "Orders" ? <Orders openJob={goToJob} openInvoice={goToInvoice} newJob={goToNewJob} openRentals={goToRentals} /> : active === "Invoices" ? <Invoices focusInvoice={invoiceFocus} /> : active === "Purchases" ? <PurchaseOrders autoStartLow={poAutoStartLow} /> : active === "Rentals" ? <Rentals focus={rentalFocus} /> : active === "Due Dates" ? <DueDates isEngineer={role === "Engineer"} openInvoice={goToInvoice} openJob={goToJob} /> : active === "Customers" ? <Customers openJob={goToJob} openInvoice={goToInvoice} /> : active === "Jobs" ? <Jobs isEngineer={role === "Engineer"} focusJob={jobFocus} newJobPrefill={jobPrefill} openInvoice={goToInvoice} /> : active === "Attendance" ? <Attendance /> : active === "Expenses" ? <AdvanceExpense isEngineer={role === "Engineer"} focusEngineer={engineerFocus} /> : active === "Accounts" ? <Accounts openInvoice={goToInvoice} /> : active === "Reports" ? <Reports openInvoice={goToInvoice} openJob={goToJob} openStockItem={goToStockItem} openEngineer={goToEngineer} /> : <>
-        <div className="mb-8 flex flex-wrap items-end justify-between gap-4"><div><p className="erp-secondary-text">{new Intl.DateTimeFormat("en-IN", { weekday: "long", day: "numeric", month: "long" }).format(new Date())}</p><h1>Good morning, Arun</h1><p className="erp-secondary-text mt-1">Here’s a quick view of what needs your attention.</p></div><button className="erp-action">Create quotation <Icon name="arrow" size={16} /></button></div>
+        {active === "Settings" ? <Settings /> : active === "Stock" ? <Stock isEngineer={role === "Engineer"} focusItem={stockFocus} onCreatePO={goToLowStockPO} onOpenRental={goToRentals} /> : active === "Leads" ? <Leads openQuote={goToQuote} /> : active === "Quotations" ? <Quotations focusQuote={quoteFocus} /> : active === "Orders" ? <Orders focusOrder={orderFocus} openJob={goToJob} openInvoice={goToInvoice} newJob={goToNewJob} openRentals={goToRentals} /> : active === "Invoices" ? <Invoices focusInvoice={invoiceFocus} /> : active === "Purchases" ? <PurchaseOrders autoStartLow={poAutoStartLow} /> : active === "Rentals" ? <Rentals focus={rentalFocus} /> : active === "Due Dates" ? <DueDates isEngineer={role === "Engineer"} focusItem={dueItemFocus} openInvoice={goToInvoice} openJob={goToJob} /> : active === "Customers" ? <Customers focusCustomer={customerFocus} openJob={goToJob} openInvoice={goToInvoice} /> : active === "Jobs" ? <Jobs isEngineer={role === "Engineer"} focusJob={jobFocus} newJobPrefill={jobPrefill} openInvoice={goToInvoice} /> : active === "Attendance" ? <Attendance /> : active === "Expenses" ? <AdvanceExpense isEngineer={role === "Engineer"} focusEngineer={engineerFocus} /> : active === "Accounts" ? <Accounts openInvoice={goToInvoice} /> : active === "Reports" ? <Reports openInvoice={goToInvoice} openJob={goToJob} openStockItem={goToStockItem} openEngineer={goToEngineer} /> : <>
+        <div className="mb-8 flex flex-wrap items-end justify-between gap-4"><div><p className="erp-secondary-text">{new Intl.DateTimeFormat("en-IN", { weekday: "long", day: "numeric", month: "long" }).format(new Date())}</p><h1>Good morning, Arun</h1><p className="erp-secondary-text mt-1">Here’s a quick view of what needs your attention.</p></div><button className="erp-action" onClick={() => setActive("Quotations")}>Create quotation <Icon name="arrow" size={16} /></button></div>
         <section className="erp-stats" aria-label="Business summary">
-          {[ ["Open quotations", "12", "₹ 6.40 L", "quote", "sales", "↑ 18% vs last week"], ["Pending invoices", "08", "₹ 8.20 L", "invoice", "money", "↑ 6% vs last week"], ["Stock alerts", "04", "Items to review", "stock", "stock", "↑ 2 new alerts"], ["Due this week", "03", "Follow up today", "due", "overdue", "↓ 1 from last week"] ].map(([label, value, detail, icon, tone, trend]) => <article key={label} className="erp-stat"><span className={`erp-stat-icon erp-stat-icon--${tone}`}><Icon name={icon as IconName} /></span><div className="erp-stat-label"><p>{label}</p><small>{detail}</small></div><strong>{value}</strong><em className={`erp-trend erp-trend--${tone}`}>{trend}</em></article>)}
+          {[
+            { label: "Open quotations", value: String(openQuotes.length).padStart(2, "0"), detail: money(openQuotesValue), icon: "quote" as const, tone: "sales", onClick: () => setActive("Quotations") },
+            { label: "Pending invoices", value: String(pendingInvoices.length).padStart(2, "0"), detail: money(pendingInvoicesValue), icon: "invoice" as const, tone: "money", onClick: () => setActive("Invoices") },
+            { label: "Stock alerts", value: String(lowStockItems.length).padStart(2, "0"), detail: "Items to review", icon: "stock" as const, tone: "stock", onClick: () => setActive("Stock") },
+            { label: "Due this week", value: String(dueThisWeek.length).padStart(2, "0"), detail: "Follow up this week", icon: "due" as const, tone: "overdue", onClick: () => setActive("Due Dates") },
+          ].map((stat) => <article key={stat.label} className="erp-stat" onClick={stat.onClick} style={{ cursor: "pointer" }}><span className={`erp-stat-icon erp-stat-icon--${stat.tone}`}><Icon name={stat.icon} /></span><div className="erp-stat-label"><p>{stat.label}</p><small>{stat.detail}</small></div><strong>{stat.value}</strong></article>)}
         </section>
         <section className="erp-dashboard-grid">
-          <article className="erp-panel"><div className="erp-panel-head"><div><h2>Today’s priorities</h2><p>Tasks that need a response today</p></div><button className="erp-text-button" onClick={() => setActive("Due Dates")}>View all</button></div>{[["Create invoice", "QT-2026-0827 · Tera Research", "10:30 AM", "Ready to invoice", "blue"], ["Approve purchase order", "PO-24093", "12:00 PM", "Ready to approve", "amber"], ["Follow up on payment", "Arka Diagnostics", "3:30 PM", "Overdue", "rose"]].map(([task, company, time, status, tone]) => <div className="erp-task" key={task}><span className="erp-task-check" /><div><b>{task}</b><small>{company}</small></div><span className={`erp-chip erp-chip--${tone}`}>{status}</span><time>{time}</time></div>)}<div className="erp-attendance"><div><b>Who’s in today</b><small>18 of 22 team members present</small></div><div className="erp-avatars"><span>AK</span><span>PS</span><span>NR</span><span>+15</span></div></div></article>
-          <article className="erp-panel"><div className="erp-panel-head"><div><h2>Attention needed</h2><p>Exceptions across your business</p></div><button className="erp-icon-button"><Icon name="more" /></button></div>{[...due.overdue, ...due.dueToday].slice(0, 4).map((item) => <div className="erp-alert" key={item.id} onClick={() => setActive("Due Dates")}><div><b>{item.title}</b><small>{[item.party, item.amount ? money(item.amount) : null, prettyDate(item.date)].filter(Boolean).join(" · ")}</small></div><span className={`erp-chip erp-chip--${due.overdue.includes(item) ? "rose" : "amber"}`}>{due.overdue.includes(item) ? "Overdue" : "Due today"}</span><Icon name="chevron" size={16} /></div>)}{![...due.overdue, ...due.dueToday].length && <div className="erp-alert"><div><b>Nothing overdue</b><small>Everything is up to date</small></div></div>}<div className="erp-collections"><div><b>Collections by week</b><small>Amount collected</small></div><strong>₹ 12.4 L</strong><div className="erp-bars" aria-label="Collections mini bar chart"><i /><i /><i /><i /><i /></div><div className="erp-bar-labels"><span>W1</span><span>W2</span><span>W3</span><span>W4</span><span>W5</span></div></div></article>
+          <article className="erp-panel"><div className="erp-panel-head"><div><h2>Today’s priorities</h2><p>Tasks that need a response today</p></div><button className="erp-text-button" onClick={() => setActive("Due Dates")}>View all</button></div>{todaysPriorities.map((alert) => <div className="erp-task" key={alert.id} onClick={alert.onOpen} style={{ cursor: "pointer" }}><span className="erp-task-check" /><div><b>{alert.title}</b><small>{alert.detail}</small></div><span className={`erp-chip erp-chip--${alert.tone}`}>{alert.tone === "rose" ? "Overdue" : "Due"}</span></div>)}{!todaysPriorities.length && <div className="erp-task"><div><b>Nothing needs attention today</b><small>Everything is up to date</small></div></div>}<div className="erp-attendance"><div><b>Who’s in today</b><small>{presentToday.length} of {engineers.length} team members present</small></div><div className="erp-avatars">{presentToday.slice(0, 3).map((engineer) => <span key={engineer.name}>{initials(engineer.name)}</span>)}{presentToday.length > 3 && <span>+{presentToday.length - 3}</span>}</div></div></article>
+          <article className="erp-panel"><div className="erp-panel-head"><div><h2>Attention needed</h2><p>Exceptions across your business</p></div><button className="erp-icon-button"><Icon name="more" /></button></div>{attentionAlerts.map((alert) => <div className="erp-alert" key={alert.id} onClick={alert.onOpen} style={{ cursor: "pointer" }}><div><b>{alert.title}</b><small>{alert.detail}</small></div><span className={`erp-chip erp-chip--${alert.tone}`}>{alert.tone === "rose" ? "Overdue" : "Due soon"}</span><Icon name="chevron" size={16} /></div>)}{!attentionAlerts.length && <div className="erp-alert"><div><b>Nothing overdue</b><small>Everything is up to date</small></div></div>}<div className="erp-collections"><div><b>Collections by week</b><small>Amount collected</small></div><strong>{money(collectionsTotal)}</strong><div className="erp-bars" aria-label="Collections mini bar chart">{weeklyCollections.map((value, index) => <i key={index} style={{ height: `${Math.max(6, Math.round(value / maxWeekly * 100))}%` }} />)}</div><div className="erp-bar-labels"><span>W1</span><span>W2</span><span>W3</span><span>W4</span><span>W5</span></div></div></article>
         </section>
         </>}
       </main>

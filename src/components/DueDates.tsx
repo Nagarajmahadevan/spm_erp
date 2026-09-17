@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { ALERT_SETTINGS, APPROVER, CAL_LAB, ENGINEER, WAREHOUSE, dateIso, dayDifference, money, prettyDate, stamp } from "./erpMasters";
 import { siteById, vendorMaster } from "./erpMasters";
-import { balanceOf, invoiceTotals, nextDueFor, openJobFor, paidSoFar, statutoryDues, updateStore, useErpStore, type Job, type PaymentMode, type PaymentRecord, type StockMove } from "./erpStore";
+import { balanceOf, invoiceTotals, nextDueFor, openJobFor, paidSoFar, payableBalance, payablePaymentStatus, recordSupplierPayment, statutoryDues, updateStore, useErpStore, type Job, type PaymentMode, type PaymentRecord, type StockMove, type SupplierPayment } from "./erpStore";
 import { Overlay, Pagination, useTablePage } from "./ErpUi";
 import { RecordReceipt } from "./Accounts";
 
@@ -91,13 +91,12 @@ export function buildDueItems(store: ReturnType<typeof useErpStore>): DueItem[] 
     owner: APPROVER, lead: ALERT_SETTINGS.leadDays.Payment, recordKind: "invoice", recordId: invoice.id,
   }));
 
-  // A received PO's vendor bill is a Payable in Accounts now, not a due item here — see
-  // PurchaseOrders.tsx and Accounts.tsx's payableFromPurchaseOrder.
-
-  store.bills.forEach((bill) => items.push({
-    id: `bill-${bill.id}`, type: "Bill", title: `${bill.name} — ${bill.vendor}`,
-    party: bill.vendor, date: bill.dueDate, amount: bill.amount, owner: bill.owner,
-    lead: ALERT_SETTINGS.leadDays.Bill, recordKind: "bill", recordId: bill.id, note: bill.every,
+  // Vendor bills, rent, EB and internet all live in Accounts → Payables now (Payable) — this
+  // is the one source of truth for what SPM owes and what it has paid.
+  store.payables.filter((bill) => payablePaymentStatus(bill, store.supplierPayments) !== "Paid").forEach((bill) => items.push({
+    id: `bill-${bill.id}`, type: "Bill", title: `${bill.description} — ${bill.payee}`,
+    party: bill.payee, date: bill.dueDate, amount: payableBalance(bill, store.supplierPayments), owner: bill.createdBy,
+    lead: ALERT_SETTINGS.leadDays.Bill, recordKind: "bill", recordId: bill.id, note: bill.category,
   }));
 
   // Statutory dates come from the compliance calendar and carry penalties, so they get room.
@@ -124,14 +123,15 @@ function primaryLabel(item: DueItem) {
 type Store = ReturnType<typeof useErpStore>;
 type SnoozeCtx = { today: string; snoozeFor: string | null; setSnoozeFor: (id: string | null) => void; snooze: (item: DueItem, days: number) => void };
 
-export default function DueDates({ isEngineer = false, openInvoice, openJob }: { isEngineer?: boolean; openInvoice?: (invoiceId: string) => void; openJob?: (jobId: string) => void }) {
+export default function DueDates({ isEngineer = false, focusItem, openInvoice, openJob }: { isEngineer?: boolean; focusItem?: string; openInvoice?: (invoiceId: string) => void; openJob?: (jobId: string) => void }) {
   const store = useErpStore();
   const [tab, setTab] = useState<DueTab>("service");
   const [picked, setPicked] = useState<string[]>([]);
   const [search, setSearch] = useState("");
   const [window_, setWindow] = useState<"all" | "overdue" | "today" | "week" | "month">("all");
   const [showSnoozed, setShowSnoozed] = useState(false);
-  const [acting, setActing] = useState<DueItem | null>(null); const [opening, setOpening] = useState<DueItem | null>(null);
+  const [acting, setActing] = useState<DueItem | null>(() => focusItem ? buildDueItems(store).find((item) => item.id === focusItem) ?? null : null);
+  const [opening, setOpening] = useState<DueItem | null>(null);
   const [snoozeFor, setSnoozeFor] = useState<string | null>(null);
   const [toast, setToast] = useState("");
   const flash = (message: string) => { setToast(message); window.setTimeout(() => setToast(""), 4000); };
@@ -333,7 +333,7 @@ function ActionSheet({ item, store, close, flash }: { item: DueItem; store: Retu
   const today = dateIso();
   const unit = store.individuals.find((entry) => entry.id === item.recordId);
   const instrument = store.instruments.find((entry) => entry.id === item.recordId);
-  const bill = store.bills.find((entry) => entry.id === item.recordId);
+  const bill = store.payables.find((entry) => entry.id === item.recordId);
 
   const [date, setDate] = useState(today);
   const [amount, setAmount] = useState(String(item.balance ?? item.amount ?? 0));
@@ -368,11 +368,6 @@ function ActionSheet({ item, store, close, flash }: { item: DueItem; store: Retu
     updateStore((current) => ({ individuals: current.individuals.map((row) => row.id === unit!.id ? { ...row, rentalReturnDue: date } : row) }));
     close(); flash(`Rental extended to ${prettyDate(date)}.`);
   };
-  const markBillPaid = () => {
-    updateStore((current) => ({ bills: current.bills.map((row) => row.id === bill!.id ? { ...row, dueDate: addMonths(row.dueDate, 1) } : row) }));
-    close(); flash(`${bill!.name} marked paid. Next one due ${prettyDate(addMonths(bill!.dueDate, 1))}.`);
-  };
-
   const createJob = () => {
     updateStore((current) => {
       const number = `JOB-${Math.max(1041, ...current.jobs.map((job) => Number(job.number.split("-")[1]) || 0)) + 1}`;
@@ -422,9 +417,12 @@ function ActionSheet({ item, store, close, flash }: { item: DueItem; store: Retu
     const record: PaymentRecord = { amount: Number(amount) || 0, date, mode, reference };
     if (record.amount <= 0) return;
     if (item.type === "Statutory") updateStore((current) => ({ statutoryPaid: { ...current.statutoryPaid, [item.recordId]: record } }));
-    if (item.type === "Bill") updateStore((current) => ({ bills: current.bills.map((row) => row.id !== item.recordId ? row : { ...row, dueDate: addMonths(row.dueDate, 1), payments: [record, ...(row.payments ?? [])] }) }));
+    if (item.type === "Bill") {
+      const payment: SupplierPayment = { id: `SP-${Date.now()}`, billId: item.recordId, date, amount: record.amount, mode, reference: reference || undefined, recordedBy: item.owner, recordedAt: stamp() };
+      updateStore((current) => recordSupplierPayment(current, payment));
+    }
     close();
-    flash(`${money(record.amount)} paid by ${mode}${reference ? ` · ${reference}` : ""}. Sent to Accounts.${item.type === "Bill" ? " Next month's bill is already waiting." : ""}`);
+    flash(`${money(record.amount)} paid by ${mode}${reference ? ` · ${reference}` : ""}. Sent to Accounts.`);
   };
 
   const body = () => {
@@ -482,7 +480,7 @@ function ActionSheet({ item, store, close, flash }: { item: DueItem; store: Retu
     </>;
     // Everything on the "to pay" side records the same four things, so Accounts and Tally get it all.
     return <>
-      <p className="po-start-hint">{item.title}{item.note ? ` · ${item.note}` : ""}.{item.type === "Bill" ? " Paying it creates next month's automatically." : ""}</p>
+      <p className="po-start-hint">{item.title}{item.note ? ` · ${item.note}` : ""}.</p>
       <div className="po-receive-grid">
         <label><span>Amount paid</span><input type="number" min="0" value={amount} onChange={(event) => setAmount(event.target.value)} /></label>
         <label><span>Paid on</span><input type="date" value={date} onChange={(event) => setDate(event.target.value)} /></label>
@@ -504,13 +502,13 @@ function RecordDrawer({ item, store, close, openInvoice, openJob }: { item: DueI
   const unit = store.individuals.find((entry) => entry.id === item.recordId);
   const instrument = store.instruments.find((entry) => entry.id === item.recordId);
   const invoice = store.invoices.find((entry) => entry.id === item.recordId);
-  const bill = store.bills.find((entry) => entry.id === item.recordId);
+  const bill = store.payables.find((entry) => entry.id === item.recordId);
   const moves = store.moves.filter((entry) => entry.item === unit?.name);
   const site = siteById(instrument?.siteId ?? "");
 
-  return <Overlay onClose={close} label={instrument?.name ?? unit?.name ?? invoice?.number ?? bill?.name ?? item.title}><aside className="stock-detail due-drawer">
+  return <Overlay onClose={close} label={instrument?.name ?? unit?.name ?? invoice?.number ?? bill?.description ?? item.title}><aside className="stock-detail due-drawer">
     <div className="settings-drawer-head">
-      <div><p>{item.recordKind === "instrument" ? "Customer instrument" : item.recordKind === "equipment" ? "Our equipment" : item.recordKind === "invoice" ? "Invoice" : "Company bill"}</p><h2>{instrument?.name ?? unit?.name ?? invoice?.number ?? bill?.name}</h2></div>
+      <div><p>{item.recordKind === "instrument" ? "Customer instrument" : item.recordKind === "equipment" ? "Our equipment" : item.recordKind === "invoice" ? "Invoice" : "Bill"}</p><h2>{instrument?.name ?? unit?.name ?? invoice?.number ?? bill?.description}</h2></div>
       <button onClick={close} aria-label="Close">×</button>
     </div>
     {instrument && <>
@@ -547,11 +545,12 @@ function RecordDrawer({ item, store, close, openInvoice, openJob }: { item: DueI
       <section className="stock-detail-section"><h3>What has happened</h3><div className="lead-timeline quote-activity">{invoice.activities.map((activity, index) => <div key={index}><i /><p><b>{activity.title}</b><span>{activity.meta}</span></p></div>)}</div></section>
     </>}
     {bill && <dl className="invoice-facts due-facts">
-      <div><dt>Vendor</dt><dd>{bill.vendor}</dd></div>
+      <div><dt>Payee</dt><dd>{bill.payee}</dd></div>
+      <div><dt>Category</dt><dd>{bill.category}</dd></div>
       <div><dt>Amount</dt><dd>{money(bill.amount)}</dd></div>
+      <div><dt>Balance</dt><dd>{money(payableBalance(bill, store.supplierPayments))}</dd></div>
       <div><dt>Due</dt><dd>{prettyDate(bill.dueDate)}</dd></div>
-      <div><dt>How often</dt><dd>{bill.every}</dd></div>
-      <div><dt>Who looks after it</dt><dd>{bill.owner}</dd></div>
+      <div><dt>Who looks after it</dt><dd>{bill.createdBy}</dd></div>
     </dl>}
   </aside></Overlay>;
 }

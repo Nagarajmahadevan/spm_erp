@@ -9,6 +9,16 @@ import { poFromOrder, nextNumber as nextPoNumber } from "./PurchaseOrders";
 type DisplayStatus = QuoteStatus | "Expired";
 type AcceptDetails = { poNumber: string; poDate: string; poAttachment?: string; advanceAmount: number; orderType: CustomerOrderType; installationNeeded: boolean };
 
+function exportCsv(filename: string, headers: string[], rows: (string | number)[][]) {
+  const escape = (value: string | number) => { const text = String(value); return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text; };
+  const csv = [headers, ...rows].map((row) => row.map(escape).join(",")).join("\r\n");
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url; link.download = filename; document.body.appendChild(link); link.click(); document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
 const QUOTE_SERIES = { prefix: "QT-", next: 845 };
 const ORDER_SERIES = { prefix: "ORD-2026-", next: 501 };
 const statuses: DisplayStatus[] = ["Draft", "Sent", "Accepted", "Rejected", "Expired"];
@@ -72,6 +82,8 @@ export default function Quotations({ focusQuote }: { focusQuote?: string } = {})
     persist(next, `Order ${order.number} created`);
   };
   const filtered = useMemo(() => quotes.filter((quote) => `${displayNumber(quote)} ${quote.customer} ${quote.contact} ${quote.subject}`.toLowerCase().includes(search.toLowerCase()) && (status === "All statuses" || statusFor(quote) === status)), [quotes, search, status]);
+  const exportQuotes = () => exportCsv(`quotations-${dateIso()}.csv`, ["Quotation No.", "Customer", "Contact", "Status", "Valid Until", "Value"],
+    filtered.map((quote) => [displayNumber(quote), quote.customer, quote.contact, statusFor(quote), prettyDate(quote.validUntil), totalsFor(quote.items, quote.customerState === COMPANY.state, quote.overallDiscount ?? 0, quote.freightCharges ?? 0).grandTotal]));
   const cards = [["Drafts to complete", quotes.filter((quote) => statusFor(quote) === "Draft").length, "draft"], ["Awaiting response", quotes.filter((quote) => statusFor(quote) === "Sent").length, "sent"], ["Expiring this week", quotes.filter((quote) => statusFor(quote) === "Sent" && dayDifference(quote.validUntil) >= 0 && dayDifference(quote.validUntil) <= 7).length, "expiring"], ["Accepted this month", quotes.filter((quote) => statusFor(quote) === "Accepted").length, "accepted"]] as const;
 
   if (editor) return <>
@@ -79,7 +91,7 @@ export default function Quotations({ focusQuote }: { focusQuote?: string } = {})
     {toast && <div className="settings-toast" role="status">✓ {toast}</div>}
   </>;
   return <section className="leads-page quotations-page">
-    <div className="leads-heading"><div><p className="erp-secondary-text">Sales / Quotations</p><h1>Quotations</h1><p className="erp-secondary-text mt-1">Build complete, GST-ready offers without re-entering details later.</p></div><div className="leads-actions"><button className="erp-action" onClick={() => setEditor(blankQuote(nextNumber(quotes)))}>+ New quotation</button><div className="leads-overflow"><button className="settings-outline" onClick={() => setOverflow((open) => !open)}>⋯</button>{overflow && <div><button onClick={() => flash("Quotation export is ready")}>Export</button></div>}</div></div></div>
+    <div className="leads-heading"><div><p className="erp-secondary-text">Sales / Quotations</p><h1>Quotations</h1><p className="erp-secondary-text mt-1">Build complete, GST-ready offers without re-entering details later.</p></div><div className="leads-actions"><button className="erp-action" onClick={() => setEditor(blankQuote(nextNumber(quotes)))}>+ New quotation</button><div className="leads-overflow"><button className="settings-outline" onClick={() => setOverflow((open) => !open)}>⋯</button>{overflow && <div><button onClick={() => { setOverflow(false); exportQuotes(); }}>Export</button></div>}</div></div></div>
     <div className="quotations-overview">{cards.map(([label, value, tone]) => <button key={label} className={`leads-stat quotations-stat quotations-stat--${tone}`} onClick={() => setStatus(label.includes("Draft") ? "Draft" : label.includes("Awaiting") || label.includes("Expiring") ? "Sent" : "Accepted")}><span>{label}</span><b>{value}</b></button>)}</div>
     <div className="leads-toolbar quotation-toolbar"><div className="settings-list-search"><span>⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search quotations" /></div><select value={status} onChange={(event) => setStatus(event.target.value)}><option>All statuses</option>{statuses.map((item) => <option key={item}>{item}</option>)}</select></div>
     <div className="leads-table-wrap"><table className="leads-table quotations-table"><thead><tr><th>Quotation no.</th><th>Customer & contact</th><th>Items</th><th>Value incl. tax</th><th>Status</th><th>Validity</th><th>Owner</th></tr></thead><tbody>{filtered.map((quote) => { const docStatus = statusFor(quote); const validity = validityLabel(quote.validUntil); const total = totalsFor(quote.items, quote.customerState === COMPANY.state); return <tr key={quote.id} onClick={() => setEditor(quote)}><td><b>{displayNumber(quote)}</b><small>{quote.superseded ? "Superseded" : quote.sentAt ? `Sent ${quote.sentAt}` : "Not sent"}</small></td><td><b>{quote.customer || "Customer not selected"}</b><small>{quote.contact || "No contact"}</small></td><td className="quote-subject"><b>{quote.items[0]?.item || quote.subject || "No items"}</b>{quote.items.length > 1 && <small>and {quote.items.length - 1} more</small>}</td><td className="quote-value">{money(total.grandTotal)}</td><td><span className={`quote-status quote-status--${docStatus.toLowerCase()}`}>{docStatus}</span></td><td className={validity.startsWith("Expired") || validity === "Expires today" ? "quote-expiring" : ""}>{validity}</td><td><span className="lead-assignee"><i>{initials(quote.owner)}</i>{quote.owner}</span></td></tr>; })}</tbody></table>{!filtered.length && <div className="settings-empty"><b>No quotations match these filters</b><p>Clear a filter or create a complete quotation to get started.</p><button className="erp-action" onClick={() => setEditor(blankQuote(nextNumber(quotes)))}>+ New quotation</button></div>}</div>

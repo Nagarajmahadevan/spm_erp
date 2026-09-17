@@ -6,11 +6,11 @@ import CustomerInstrumentsPanel from "./CustomerInstruments";
 const nextCustomerId = (all: Customer[]) => `CUS-${String(Math.max(0, ...all.map((item) => Number(item.id.split("-").at(-1)) || 0)) + 1).padStart(4, "0")}`;
 const blankCustomer = (id: string): Customer => ({ id, name: "", contact: "", gstin: "", state: "Karnataka", city: "", billing: "", shipping: "", paymentTerms: "Net 30" });
 
-export default function Customers({ openJob, openInvoice }: { openJob?: (jobId: string) => void; openInvoice?: (invoiceId: string) => void }) {
+export default function Customers({ focusCustomer, openJob, openInvoice }: { focusCustomer?: string; openJob?: (jobId: string) => void; openInvoice?: (invoiceId: string) => void }) {
   const store = useErpStore();
   const { customers, instruments, quotes, jobs, invoices, customerReceipts, customerTds } = store;
   const [search, setSearch] = useState("");
-  const [editorId, setEditorId] = useState<string | null>(null);
+  const [editorId, setEditorId] = useState<string | null>(focusCustomer ?? null);
   const [editing, setEditing] = useState<Customer | null>(null);
   const [toast, setToast] = useState("");
   const flash = (message: string) => { setToast(message); window.setTimeout(() => setToast(""), 2800); };

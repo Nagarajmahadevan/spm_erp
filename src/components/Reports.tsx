@@ -2,29 +2,24 @@ import { useMemo, useState } from "react";
 import { COMPANY, STOCK_LOCATIONS, engineers, dateIso, dayDifference, money, prettyDate, stamp } from "./erpMasters";
 import {
   amcStatusFor, balanceAt, balanceOf, balanceStatus, engineerBalance, invoicePaymentStatus, invoiceReceiptsApplied, invoiceTdsRecorded,
-  invoiceTotals, jobFullyResolved, nextVisit, onOrderFor, payableAppliedPayments, payableBalance, payablePaymentStatus, payableTdsRecorded,
-  totalOf, useErpStore, customerAdvance, PAYABLE_CATEGORIES,
-  type Individual, type Invoice, type Job, type PayableCategory, type Quantity,
+  invoiceTotals, jobFullyResolved, nextVisit, onOrderFor,
+  totalOf, useErpStore, customerAdvance,
+  type Individual, type Invoice, type Job, type Quantity,
 } from "./erpStore";
 import { buildDueItems } from "./DueDates";
-import { buildTransactions } from "./Accounts";
-import { dayRecord } from "./Attendance";
-import { Overlay, Pagination, useTablePage } from "./ErpUi";
+import { Pagination, useTablePage } from "./ErpUi";
 import "./reports.css";
 
 type Store = ReturnType<typeof useErpStore>;
-type ReportId = "customer-outstanding" | "sales-register" | "receipts-payments" | "bills-due" | "stock-position" | "due-dates" | "job-summary" | "attendance-summary" | "advance-expense";
+type ReportId = "customer-outstanding" | "sales-register" | "stock-position" | "due-dates" | "job-summary" | "advance-expense";
 type NavCallbacks = { openInvoice?: (invoiceId: string) => void; openJob?: (jobId: string) => void; openStockItem?: (itemId: string) => void; openEngineer?: (name: string) => void };
 
 const REPORT_LIST: { id: ReportId; label: string; group: string; question: string }[] = [
   { id: "customer-outstanding", label: "Customer Outstanding", group: "Sales & Accounts", question: "Who owes us money, and what needs follow-up?" },
   { id: "sales-register", label: "Sales Register", group: "Sales & Accounts", question: "What have we invoiced during a period?" },
-  { id: "receipts-payments", label: "Receipts & Payments", group: "Sales & Accounts", question: "What money came in and went out?" },
-  { id: "bills-due", label: "Bills Due", group: "Sales & Accounts", question: "Which supplier and company bills need payment?" },
   { id: "stock-position", label: "Stock Position", group: "Stock & Service", question: "What stock do we have, where is it, and what is available?" },
   { id: "due-dates", label: "Upcoming Due Dates", group: "Stock & Service", question: "What needs action soon?" },
   { id: "job-summary", label: "Job Summary", group: "Stock & Service", question: "What work is pending, completed or overdue?" },
-  { id: "attendance-summary", label: "Attendance Summary", group: "People & Expenses", question: "What attendance has been recorded, and what needs correction?" },
   { id: "advance-expense", label: "Engineer Advance & Expense", group: "People & Expenses", question: "Who holds an unsettled advance, who needs reimbursement, and which claims are pending?" },
 ];
 const REPORT_GROUPS = ["Sales & Accounts", "Stock & Service", "People & Expenses"];
@@ -101,12 +96,9 @@ export default function Reports({ openInvoice, openJob, openStockItem, openEngin
         <p className="reports-description">{active.question}</p>
         {reportId === "customer-outstanding" && <CustomerOutstandingReport store={store} openInvoice={openInvoice} />}
         {reportId === "sales-register" && <SalesRegisterReport store={store} openInvoice={openInvoice} />}
-        {reportId === "receipts-payments" && <ReceiptsPaymentsReport store={store} openInvoice={openInvoice} />}
-        {reportId === "bills-due" && <BillsDueReport store={store} />}
         {reportId === "stock-position" && <StockPositionReport store={store} openStockItem={openStockItem} />}
         {reportId === "due-dates" && <UpcomingDueDatesReport store={store} openJob={openJob} />}
         {reportId === "job-summary" && <JobSummaryReport store={store} openJob={openJob} />}
-        {reportId === "attendance-summary" && <AttendanceSummaryReport store={store} />}
         {reportId === "advance-expense" && <AdvanceExpenseReport store={store} openEngineer={openEngineer} />}
       </div>
     </div>
@@ -214,93 +206,7 @@ function SalesRegisterReport({ store, openInvoice }: { store: Store; openInvoice
   </div>;
 }
 
-/* ─── C. Receipts & Payments ──────────────────────────────────────── */
-function ReceiptsPaymentsReport({ store, openInvoice }: { store: Store; openInvoice?: (invoiceId: string) => void }) {
-  const all = useMemo(() => buildTransactions(store), [store]);
-  const parties = useMemo(() => [...new Set(all.map((row) => row.party))].sort(), [all]);
-  const modes = useMemo(() => [...new Set(all.map((row) => row.mode))].sort(), [all]);
-  const filters = useReportFilters("receipts-payments", { from: THIS_MONTH.from, to: THIS_MONTH.to, type: "All" as "All" | "Receipt" | "Payment", party: "All parties", mode: "All modes" });
-
-  const rows = all.filter((row) => row.date >= filters.applied.from && row.date <= filters.applied.to
-    && (filters.applied.type === "All" || (filters.applied.type === "Receipt" ? row.moneyIn > 0 : row.moneyOut > 0))
-    && (filters.applied.party === "All parties" || row.party === filters.applied.party)
-    && (filters.applied.mode === "All modes" || row.mode === filters.applied.mode));
-  const { pageRows, page, setPage } = useTablePage(rows, JSON.stringify(filters.applied));
-
-  // A reversed engineer advance is kept visible for audit but is not a valid transaction, so it
-  // never counts.
-  const totals = rows.reduce((sum, row) => row.status === "Reversed" ? sum : ({ in: sum.in + row.moneyIn, out: sum.out + row.moneyOut }), { in: 0, out: 0 });
-  const net = totals.in - totals.out;
-  const scope = `${prettyDate(filters.applied.from)} – ${prettyDate(filters.applied.to)}${filters.applied.type !== "All" ? ` · ${filters.applied.type}` : ""}${filters.applied.party !== "All parties" ? ` · ${filters.applied.party}` : ""}${filters.applied.mode !== "All modes" ? ` · ${filters.applied.mode}` : ""}`;
-  const exportRows = () => exportCsv(`receipts-and-payments-${dateIso()}.csv`, ["Date", "Party", "Type", "Linked", "Mode", "Reference", "Money In", "Money Out", "Status"],
-    rows.map((row) => [prettyDate(row.date), row.party, row.type, row.linked, row.mode, row.reference, row.moneyIn, row.moneyOut, row.status]));
-
-  return <div className="reports-printable">
-    <PrintHeader label="Receipts &amp; Payments" scope={scope} />
-    <div className="reports-mini-stats"><span>Money Received <b className="reports-figure--in">{money(totals.in)}</b></span><span>Money Paid <b className="reports-figure--out">{money(totals.out)}</b></span><span>Net Movement <b>{money(net)}</b></span></div>
-    <p className="reports-note">"Net movement" is the difference above, not a bank balance.</p>
-    <div className="erp-filters reports-filters">
-      <label><span>From</span><input type="date" value={filters.draft.from} onChange={(event) => filters.setDraft({ from: event.target.value })} /></label>
-      <label><span>To</span><input type="date" value={filters.draft.to} onChange={(event) => filters.setDraft({ to: event.target.value })} /></label>
-      <label><span>Type</span><select value={filters.draft.type} onChange={(event) => filters.setDraft({ type: event.target.value as typeof filters.draft.type })}><option value="All">Receipts &amp; payments</option><option value="Receipt">Receipts only</option><option value="Payment">Payments only</option></select></label>
-      <label><span>Party</span><select value={filters.draft.party} onChange={(event) => filters.setDraft({ party: event.target.value })}><option>All parties</option>{parties.map((party) => <option key={party}>{party}</option>)}</select></label>
-      <label><span>Mode</span><select value={filters.draft.mode} onChange={(event) => filters.setDraft({ mode: event.target.value })}><option>All modes</option>{modes.map((mode) => <option key={mode}>{mode}</option>)}</select></label>
-      <FilterActions dirty={filters.dirty} apply={filters.apply} reset={filters.reset} />
-    </div>
-    <ReportToolbar resultCount={rows.length} itemLabel="transactions" onExport={exportRows} />
-    <div className="erp-table-shell"><table className="erp-data-table reports-table"><thead><tr><th>Date</th><th>Party</th><th>Type</th><th>Linked</th><th>Mode</th><th>Reference</th><th className="number">Money In</th><th className="number">Money Out</th><th>Status</th></tr></thead><tbody>{pageRows.map((row) => <tr key={`${row.kind}-${row.id}`}>
-      <td>{prettyDate(row.date)}</td><td>{row.party}</td><td>{row.type}</td><td>{row.linked}</td><td>{row.mode}</td><td>{row.reference || <span className="erp-muted">—</span>}</td>
-      <td className="number">{row.moneyIn ? <span className="reports-figure--in">{money(row.moneyIn)}</span> : <span className="erp-muted">—</span>}</td>
-      <td className="number">{row.moneyOut ? <span className="reports-figure--out">{money(row.moneyOut)}</span> : <span className="erp-muted">—</span>}</td>
-      <td>{row.status}</td>
-    </tr>)}</tbody></table>{!rows.length && <EmptyState hasAny={all.length > 0} itemLabel="transactions" />}</div>
-    <Pagination total={rows.length} page={page} onPage={setPage} />
-  </div>;
-}
-
-/* ─── D. Bills Due ────────────────────────────────────────────────── */
-function BillsDueReport({ store }: { store: Store }) {
-  const payees = useMemo(() => [...new Set(store.payables.map((bill) => bill.payee))].sort(), [store.payables]);
-  const filters = useReportFilters("bills-due", { payee: "All payees", category: "All" as "All" | PayableCategory, scope: "All unpaid" as "All unpaid" | "Overdue" | "Due in next 7 days" });
-
-  const allRows = useMemo(() => store.payables.map((bill) => ({
-    bill, balance: payableBalance(bill, store.supplierPayments), applied: payableAppliedPayments(bill.id, store.supplierPayments), tds: payableTdsRecorded(bill.id, store.supplierPayments),
-    overdue: dayDifference(bill.dueDate) < 0, dueSoon: dayDifference(bill.dueDate) >= 0 && dayDifference(bill.dueDate) <= 7,
-  })).filter((row) => row.balance > 0.005), [store.payables, store.supplierPayments]);
-
-  const scoped = allRows.filter((row) => (filters.applied.payee === "All payees" || row.bill.payee === filters.applied.payee) && (filters.applied.category === "All" || row.bill.category === filters.applied.category));
-  const rows = scoped.filter((row) => filters.applied.scope === "All unpaid" || (filters.applied.scope === "Overdue" ? row.overdue : row.dueSoon));
-  const { pageRows, page, setPage } = useTablePage(rows, JSON.stringify(filters.applied));
-  const totals = scoped.reduce((sum, row) => ({ payable: sum.payable + row.balance, overdue: sum.overdue + (row.overdue ? row.balance : 0), dueSoon: sum.dueSoon + (row.dueSoon ? row.balance : 0) }), { payable: 0, overdue: 0, dueSoon: 0 });
-  const scope = `${filters.applied.scope}${filters.applied.payee !== "All payees" ? ` · ${filters.applied.payee}` : ""}${filters.applied.category !== "All" ? ` · ${filters.applied.category}` : ""}`;
-  const exportRows = () => exportCsv(`bills-due-${dateIso()}.csv`, ["Supplier / Payee", "Bill Number / Description", "Category", "Due Date", "Bill Amount", "Payments Applied", "TDS Recorded", "Balance", "Overdue"],
-    rows.map((row) => [row.bill.payee, row.bill.number || row.bill.description, row.bill.category, prettyDate(row.bill.dueDate), row.bill.amount, row.applied, row.tds, row.balance, row.overdue ? "Yes" : "No"]));
-
-  return <div className="reports-printable">
-    <PrintHeader label="Bills Due" scope={scope} />
-    <div className="reports-mini-stats"><span>Total Payable <b>{money(totals.payable)}</b></span><span>Overdue Payable <b className={totals.overdue > 0.005 ? "reports-figure--overdue" : ""}>{money(totals.overdue)}</b></span><span>Due In Next 7 Days <b>{money(totals.dueSoon)}</b></span></div>
-    <div className="erp-filters reports-filters">
-      <label><span>Supplier / Payee</span><select value={filters.draft.payee} onChange={(event) => filters.setDraft({ payee: event.target.value })}><option>All payees</option>{payees.map((payee) => <option key={payee}>{payee}</option>)}</select></label>
-      <label><span>Category</span><select value={filters.draft.category} onChange={(event) => filters.setDraft({ category: event.target.value as typeof filters.draft.category })}><option value="All">All categories</option>{PAYABLE_CATEGORIES.map((category) => <option key={category}>{category}</option>)}</select></label>
-      <label><span>Show</span><select value={filters.draft.scope} onChange={(event) => filters.setDraft({ scope: event.target.value as typeof filters.draft.scope })}><option>All unpaid</option><option>Overdue</option><option>Due in next 7 days</option></select></label>
-      <FilterActions dirty={filters.dirty} apply={filters.apply} reset={filters.reset} />
-    </div>
-    <ReportToolbar resultCount={rows.length} itemLabel="bills" onExport={exportRows} />
-    <div className="erp-table-shell"><table className="erp-data-table reports-table"><thead><tr><th>Supplier / Payee</th><th>Bill No. / Description</th><th>Category</th><th>Due Date</th><th className="number">Bill Amount</th><th className="number">Payments Applied</th><th className="number">TDS Recorded</th><th className="number">Balance</th></tr></thead><tbody>{pageRows.map((row) => <tr key={row.bill.id}>
-      <td>{row.bill.payee}</td>
-      <td>{row.bill.number || <span className="erp-muted">No bill number</span>}<small>{row.bill.description}</small></td>
-      <td><span className="accounts-category-pill">{row.bill.category}</span></td>
-      <td className={row.overdue ? "invoice-overdue" : ""}>{prettyDate(row.bill.dueDate)}{row.overdue && <small className="job-late">Overdue</small>}</td>
-      <td className="number">{money(row.bill.amount)}</td>
-      <td className="number">{row.applied > 0.005 ? money(row.applied) : <span className="erp-muted">—</span>}</td>
-      <td className="number">{row.tds > 0.005 ? money(row.tds) : <span className="erp-muted">—</span>}</td>
-      <td className="number"><b>{money(row.balance)}</b></td>
-    </tr>)}</tbody></table>{!rows.length && <EmptyState hasAny={allRows.length > 0} itemLabel="bills" />}</div>
-    <Pagination total={rows.length} page={page} onPage={setPage} />
-  </div>;
-}
-
-/* ─── E. Stock Position ───────────────────────────────────────────── */
+/* ─── C. Stock Position ───────────────────────────────────────────── */
 const opLabel = (item: Individual) => item.holder === "Customer" && item.opStatus === "In use" ? "On rent" : item.opStatus;
 const opSlug = (status: string) => status.toLowerCase().replace(/ /g, "-");
 function StockPositionReport({ store, openStockItem }: { store: Store; openStockItem?: (itemId: string) => void }) {
@@ -468,57 +374,7 @@ function JobSummaryReport({ store, openJob }: { store: Store; openJob?: (jobId: 
   </div>;
 }
 
-/* ─── H. Attendance Summary ───────────────────────────────────────── */
-function daysInMonth(monthIso: string) { const [year, month] = monthIso.split("-").map(Number); return new Date(year, month, 0).getDate(); }
-function AttendanceSummaryReport({ store }: { store: Store }) {
-  const filters = useReportFilters("attendance-summary", { month: dateIso().slice(0, 7), employee: "All employees", needsReviewOnly: false });
-  const [drill, setDrill] = useState<string | null>(null);
-  const days = useMemo(() => Array.from({ length: daysInMonth(filters.applied.month) }, (_, index) => `${filters.applied.month}-${String(index + 1).padStart(2, "0")}`), [filters.applied.month]);
-
-  const allRows = useMemo(() => engineers.map((engineer) => {
-    let present = 0, leave = 0, review = 0, noActivity = 0;
-    days.forEach((day) => { const record = dayRecord(store, engineer.name, day); if (record.status === "Present") present += 1; else if (record.status === "On leave") leave += 1; else if (record.status === "No activity recorded") noActivity += 1; if (record.attention.length) review += 1; });
-    return { employee: engineer.name, present, leave, review, noActivity };
-  }), [days, store]);
-  const rows = allRows.filter((row) => (filters.applied.employee === "All employees" || row.employee === filters.applied.employee) && (!filters.applied.needsReviewOnly || row.review > 0));
-  const { pageRows, page, setPage } = useTablePage(rows, JSON.stringify(filters.applied));
-  const scope = `${new Intl.DateTimeFormat("en-IN", { month: "long", year: "numeric" }).format(new Date(`${filters.applied.month}-01T12:00`))}${filters.applied.employee !== "All employees" ? ` · ${filters.applied.employee}` : ""}${filters.applied.needsReviewOnly ? " · Needs review" : ""}`;
-  const exportRows = () => exportCsv(`attendance-summary-${dateIso()}.csv`, ["Employee", "Days With Recorded Attendance", "Approved Leave Days", "Days Needing Review", "Past Working Days With No Activity"],
-    rows.map((row) => [row.employee, row.present, row.leave, row.review, row.noActivity]));
-
-  return <div className="reports-printable">
-    <PrintHeader label="Attendance Summary" scope={scope} />
-    <p className="reports-note">Columns can overlap — a late check-in flagged for review is still a present day — so they are not meant to add up to days in the month.</p>
-    <div className="erp-filters reports-filters">
-      <label><span>Month</span><input type="month" value={filters.draft.month} onChange={(event) => filters.setDraft({ month: event.target.value })} /></label>
-      <label><span>Employee</span><select value={filters.draft.employee} onChange={(event) => filters.setDraft({ employee: event.target.value })}><option>All employees</option>{engineers.map((engineer) => <option key={engineer.name}>{engineer.name}</option>)}</select></label>
-      <label className="settings-check"><input type="checkbox" checked={filters.draft.needsReviewOnly} onChange={(event) => filters.setDraft({ needsReviewOnly: event.target.checked })} /><span>Needs review only</span></label>
-      <FilterActions dirty={filters.dirty} apply={filters.apply} reset={filters.reset} />
-    </div>
-    <ReportToolbar resultCount={rows.length} itemLabel="employees" onExport={exportRows} />
-    <div className="erp-table-shell"><table className="erp-data-table reports-table"><thead><tr><th>Employee</th><th className="number">Days With Recorded Attendance</th><th className="number">Approved Leave Days</th><th className="number">Days Needing Review</th><th className="number">Past Working Days, No Activity</th></tr></thead><tbody>{pageRows.map((row) => <tr key={row.employee} className="erp-row-clickable" onClick={() => setDrill(row.employee)}>
-      <td><button className="erp-record-link">{row.employee}</button></td>
-      <td className="number">{row.present}</td>
-      <td className="number">{row.leave}</td>
-      <td className="number">{row.review > 0 ? <span className="reports-figure--overdue">{row.review}</span> : <span className="erp-muted">0</span>}</td>
-      <td className="number">{row.noActivity}</td>
-    </tr>)}</tbody></table>{!rows.length && <EmptyState hasAny={allRows.length > 0} itemLabel="employees" />}</div>
-    <Pagination total={rows.length} page={page} onPage={setPage} />
-    {drill && <AttendanceDrillDrawer store={store} employee={drill} days={days} close={() => setDrill(null)} />}
-  </div>;
-}
-function AttendanceDrillDrawer({ store, employee, days, close }: { store: Store; employee: string; days: string[]; close: () => void }) {
-  const records = days.map((day) => ({ day, ...dayRecord(store, employee, day) }));
-  return <Overlay onClose={close} label={`${employee} daily attendance`} className="stock-modal-backdrop accounts-overlay"><aside className="settings-drawer accounts-drawer">
-    <div className="settings-drawer-head"><div><p>Attendance detail</p><h2>{employee}</h2></div><button onClick={close} aria-label="Close">×</button></div>
-    <div className="accounts-drawer-body"><div className="erp-table-shell"><table className="erp-data-table"><thead><tr><th>Date</th><th>Status</th><th>Activity</th><th>Needs Review</th></tr></thead><tbody>{records.map((record) => <tr key={record.day}>
-      <td>{prettyDate(record.day)}</td><td>{record.status}</td><td>{record.activity}</td>
-      <td>{record.attention.length ? <span className="reports-figure--overdue">{record.attention.join(" · ")}</span> : <span className="erp-muted">—</span>}</td>
-    </tr>)}</tbody></table></div><p className="erp-muted" style={{ marginTop: 12 }}>Corrections and reviews are actioned in Attendance → Corrections.</p></div>
-  </aside></Overlay>;
-}
-
-/* ─── I. Engineer Advance & Expense ───────────────────────────────── */
+/* ─── H. Engineer Advance & Expense ───────────────────────────────── */
 const balanceSlug = (label: string) => label.toLowerCase().replace(/[^a-z]+/g, "-").replace(/^-|-$/g, "");
 function balanceLine(balance: number, pendingClaims: number) {
   const status = balanceStatus(balance, pendingClaims);
