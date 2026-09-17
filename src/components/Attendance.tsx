@@ -1,7 +1,7 @@
 import { useState } from "react";
-import { dateIso, engineers, isoDateInIst, istStamp, istTime, nowIso, prettyDate, stamp } from "./erpMasters";
+import { dateIso, engineers, isoDateInIst, istStamp, istTime, nowIso, prettyDate, siteById, stamp } from "./erpMasters";
 import { affectedJobsForLeave, attendanceStatusFor, blockedOn, eventsFor, reviewCorrection, updateStore, useErpStore, visitsOn, type AttendanceEvent, type Correction, type LeaveKind, type LeaveRequest, type LeaveStatus } from "./erpStore";
-import { Overlay, Pagination, useTablePage } from "./ErpUi";
+import { LocationMap, Overlay, Pagination, useTablePage } from "./ErpUi";
 import "./attendance.css";
 
 type Tab = "Daily" | "Monthly" | "Leave" | "Corrections";
@@ -78,7 +78,7 @@ function DailyView({ store }: { store: Store }) {
 }
 
 function EventTimeline({ events, onCorrect }: { events: AttendanceEvent[]; onCorrect?: (event: AttendanceEvent) => void }) {
-  return <div className="lead-timeline quote-activity attendance-timeline">{events.map((event) => <div key={event.id}><i /><p><b>{istTime(event.at)} · {event.kind}</b><span>{event.source}{event.jobId ? ` · ${event.jobId}` : ""}</span>{event.syncedAt !== event.at && <span>Synced {istStamp(event.syncedAt)} · recorded time retained</span>}{event.locationCheck && <span>{event.locationCheck}{typeof event.siteDistanceM === "number" ? ` · ${event.siteDistanceM} m from site` : ""}</span>}{event.location && <span>{event.location.lat.toFixed(5)}, {event.location.lng.toFixed(5)} · accuracy {event.location.accuracyM} m</span>}{onCorrect && <button className="settings-link" onClick={() => onCorrect(event)}>Request correction</button>}</p></div>)}{!events.length && <p className="attendance-empty-note">No activity recorded. Events may not have synced yet.</p>}</div>;
+  return <div className="lead-timeline quote-activity attendance-timeline">{events.map((event) => { const site = event.siteId ? siteById(event.siteId) : undefined; return <div key={event.id}><i /><p><b>{istTime(event.at)} · {event.kind}</b><span>{event.source}{event.jobId ? ` · ${event.jobId}` : ""}</span>{event.syncedAt !== event.at && <span>Synced {istStamp(event.syncedAt)} · recorded time retained</span>}{event.locationCheck && <span>{event.locationCheck}{typeof event.siteDistanceM === "number" ? ` · ${event.siteDistanceM} m from site` : ""}</span>}{event.location && <span>{event.location.lat.toFixed(5)}, {event.location.lng.toFixed(5)} · accuracy {event.location.accuracyM} m</span>}{onCorrect && <button className="settings-link" onClick={() => onCorrect(event)}>Request correction</button>}</p>{event.location && <LocationMap point={event.location} site={site?.lat !== undefined && site?.lng !== undefined ? { lat: site.lat, lng: site.lng, name: site.name } : undefined} />}</div>; })}{!events.length && <p className="attendance-empty-note">No activity recorded. Events may not have synced yet.</p>}</div>;
 }
 
 function TimelineDrawer({ store, engineer, date, close }: { store: Store; engineer: string; date: string; close: () => void }) {

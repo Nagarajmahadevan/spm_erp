@@ -176,13 +176,13 @@ function EngineerToday({ jobs, openJob }: { jobs: Job[]; openJob: (id: string) =
   const rows = [...jobs].sort((a, b) => (a.plannedStart ?? "").localeCompare(b.plannedStart ?? ""));
   return <>
     <div className="erp-filter-summary"><span>{rows.length} job{rows.length === 1 ? "" : "s"} scheduled today</span></div>
-    <div className="erp-table-shell"><table className="erp-data-table jobs-register leads-style-table"><colgroup><col style={{ width: "18%" }} /><col style={{ width: "32%" }} /><col style={{ width: "20%" }} /><col style={{ width: "15%" }} /><col style={{ width: "15%" }} /></colgroup><thead><tr><th>Job / Type</th><th>Customer & Site</th><th>Planned time</th><th>Work status</th><th /></tr></thead><tbody>{rows.map((job) => <tr key={job.id} className="jobs-row-clickable" onClick={() => openJob(job.id)}>
-      <td><b>{job.number}</b><small>{job.type}</small></td>
-      <td><b>{job.customer}</b><small>{siteById(job.siteId)?.name} · {siteById(job.siteId)?.city}</small></td>
-      <td>{job.plannedStart ? <span className="jobs-date">{label12h(visitWindow(job).start)}–{label12h(visitWindow(job).end)}</span> : <span className="erp-muted">Time not set</span>}</td>
-      <td><span className={statusClass(job.status)}>{job.status}</span></td>
-      <td><button className="erp-record-link" onClick={(event) => { event.stopPropagation(); openJob(job.id); }}>Open</button></td>
-    </tr>)}</tbody></table>{!rows.length && <div className="settings-empty"><b>No jobs scheduled for today</b><p>Check back once you're assigned a job.</p></div>}</div>
+    <div className="engineer-job-cards">{rows.map((job) => <button key={job.id} className="engineer-job-card" onClick={() => openJob(job.id)}>
+      <div className="engineer-job-card-top"><b>{job.number}</b><span className={statusClass(job.status)}>{job.status}</span></div>
+      <p className="engineer-job-card-customer">{job.customer}</p>
+      <p className="engineer-job-card-site">{siteById(job.siteId)?.name} · {siteById(job.siteId)?.city}</p>
+      <div className="engineer-job-card-meta"><span>{job.type}</span>{job.plannedStart ? <span className="jobs-date">{label12h(visitWindow(job).start)}–{label12h(visitWindow(job).end)}</span> : <span className="erp-muted">Time not set</span>}</div>
+    </button>)}</div>
+    {!rows.length && <div className="settings-empty"><b>No jobs scheduled for today</b><p>Check back once you're assigned a job.</p></div>}
   </>;
 }
 

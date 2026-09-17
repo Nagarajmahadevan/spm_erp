@@ -86,6 +86,7 @@ export default function Dashboard() {
   const [poAutoStartLow, setPoAutoStartLow] = useState(false);
   const [jobPrefill, setJobPrefill] = useState<Partial<Job> | undefined>(undefined);
   const [searchOpen, setSearchOpen] = useState(false);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const store = useErpStore();
   const due = dueSummary(store);
   const goToJob = (jobId: string) => { setJobFocus(jobId); setActive("Jobs"); };
@@ -177,15 +178,15 @@ export default function Dashboard() {
       </div>
     </aside>
 
-    <div className={`erp-main ${collapsed ? "erp-main--wide" : ""}`}>
+    <div className={`erp-main ${collapsed ? "erp-main--wide" : ""} ${role === "Engineer" ? "erp-main--engineer" : ""}`}>
       <header className="erp-topbar">
-        <div className="relative">
+        {role === "Engineer" ? <div className="erp-topbar-engineer"><img src={spmLogo} alt="SPM Lab Solutions" className="h-7 w-auto" /><span>Arun Kumar</span></div> : <div className="relative">
           <div className="erp-search"><Icon name="search" /><input value={search} onChange={(event) => { setSearch(event.target.value); setSearchOpen(true); }} onFocus={() => setSearchOpen(true)} onBlur={() => window.setTimeout(() => setSearchOpen(false), 150)} onKeyDown={(event) => { if (event.key === "Escape") { setSearch(""); setSearchOpen(false); } }} placeholder="Search customers, orders, invoices, jobs, stock…" aria-label="Global search" /><kbd>⌘ K</kbd></div>
           {searchOpen && search.trim() && <div className="erp-popover">
             <p className="mb-2 text-xs font-semibold text-[#3d4a5c]">Search results</p>
             {searchHits.length ? searchHits.map((hit) => <button key={`${hit.group}-${hit.label}`} className="erp-alert" style={{ cursor: "pointer", width: "100%", textAlign: "left" }} onMouseDown={(event) => { event.preventDefault(); openSearchHit(hit); }}><div><b>{hit.label}</b><small>{hit.group} · {hit.sublabel}</small></div></button>) : <p>No matches</p>}
           </div>}
-        </div>
+        </div>}
         <div className="relative flex items-center gap-2">
           <button onClick={() => setAlertsOpen((value) => !value)} className="erp-icon-button relative" aria-label="Notifications"><Icon name="bell" />{due.badge > 0 && <span className="erp-alert-count">{due.badge}</span>}</button>
           {alertsOpen && <div className="erp-popover right-14"><p className="mb-2 text-xs font-semibold text-[#3d4a5c]">Notifications</p>{due.overdue.slice(0, 3).map((item) => <p key={item.id}>{item.title}</p>)}{!due.overdue.length && <p>Nothing overdue</p>}</div>}
@@ -208,6 +209,15 @@ export default function Dashboard() {
         </section>
         </>}
       </main>
+      {role === "Engineer" && <nav className="erp-mobile-tabbar" aria-label="Engineer navigation">
+        {visibleModules.map(([name, icon]) => <button key={name} className={active === name ? "is-active" : ""} onClick={() => { setActive(name); setMobileMenuOpen(false); }}><Icon name={icon as IconName} /><span>{name}</span></button>)}
+        <button className={mobileMenuOpen ? "is-active" : ""} onClick={() => setMobileMenuOpen((value) => !value)} aria-expanded={mobileMenuOpen}><span className="erp-mobile-tabbar-avatar">AK</span><span>Account</span></button>
+      </nav>}
+      {mobileMenuOpen && <div className="erp-mobile-menu-backdrop" onClick={() => setMobileMenuOpen(false)}><div className="erp-mobile-menu" onClick={(event) => event.stopPropagation()}>
+        <div className="erp-mobile-menu-head"><span className="erp-avatar">AK</span><div><b>Arun Kumar</b><small>{role}</small></div></div>
+        <button onClick={() => { setMobileMenuOpen(false); toggleRole(); }}>Switch to Admin</button>
+        <button onClick={() => { setMobileMenuOpen(false); navigate("/login"); }}>Sign out</button>
+      </div></div>}
     </div>
   </div>;
 }

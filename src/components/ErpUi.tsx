@@ -1,5 +1,7 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
+import L from "leaflet";
+import "leaflet/dist/leaflet.css";
 
 export function ActionMenu({ label = "Actions", ariaLabel, items }: { label?: string; ariaLabel?: string; items: { label: string; onSelect: () => void; disabled?: boolean }[] }) {
   const [open, setOpen] = useState(false);
@@ -81,6 +83,30 @@ export function useTablePage<T>(rows: T[], resetKey: string, pageSize = 10) {
 export function Pagination({ total, page, onPage, pageSize = 10 }: { total: number; page: number; onPage: (page: number) => void; pageSize?: number }) {
   const pages = Math.max(1, Math.ceil(total / pageSize));
   return <div className="erp-pagination"><span role="status">{total ? `${(page - 1) * pageSize + 1}–${Math.min(page * pageSize, total)} of ${total}` : "0 results"}</span><div><button aria-label="Previous page" disabled={page <= 1} onClick={() => onPage(page - 1)}>Previous</button><span>Page {page} of {pages}</span><button aria-label="Next page" disabled={page >= pages} onClick={() => onPage(page + 1)}>Next</button></div></div>;
+}
+
+/** A small interactive OpenStreetMap view for a recorded GPS point, with an optional second
+ *  reference point (e.g. the site the check-in was expected at) joined by a dashed line. Uses
+ *  plain circle markers rather than Leaflet's default pin icons, which need extra bundler
+ *  configuration to load their image assets correctly. */
+export function LocationMap({ point, site, height = 180 }: { point: { lat: number; lng: number; accuracyM?: number }; site?: { lat: number; lng: number; name?: string }; height?: number }) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!containerRef.current) return;
+    const map = L.map(containerRef.current, { zoomControl: false, scrollWheelZoom: false }).setView([point.lat, point.lng], 16);
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors', maxZoom: 19 }).addTo(map);
+    L.circleMarker([point.lat, point.lng], { radius: 8, color: "#137fa9", weight: 2, fillColor: "#1aa8dc", fillOpacity: 0.9 }).addTo(map).bindTooltip("Recorded location");
+    if (point.accuracyM) L.circle([point.lat, point.lng], { radius: point.accuracyM, color: "#1aa8dc", weight: 1, fillOpacity: 0.08 }).addTo(map);
+    let bounds = L.latLngBounds([[point.lat, point.lng]]);
+    if (site) {
+      L.circleMarker([site.lat, site.lng], { radius: 8, color: "#a94b59", weight: 2, fillColor: "#e2707d", fillOpacity: 0.9 }).addTo(map).bindTooltip(site.name ?? "Site");
+      L.polyline([[point.lat, point.lng], [site.lat, site.lng]], { color: "#8796a4", weight: 2, dashArray: "4 6" }).addTo(map);
+      bounds = bounds.extend([site.lat, site.lng]);
+      map.fitBounds(bounds, { padding: [28, 28], maxZoom: 17 });
+    }
+    return () => { map.remove(); };
+  }, [point.lat, point.lng, point.accuracyM, site?.lat, site?.lng, site?.name]);
+  return <div ref={containerRef} className="erp-location-map" style={{ height }} role="img" aria-label="Recorded location on a map" />;
 }
 
 export default ActionMenu;

@@ -102,4 +102,24 @@
 .jobs-free-slots > p { font-size: 13px; margin-bottom: 8px; }
 .jobs-free-slots button { margin: 6px 8px 6px 0; font-size: 13px; }
 .jobs-free-slots small { display: block; margin-top: 5px; color: #6d7e8b; font-size: 12px; }
+
+/* Engineer's Today view — tap-friendly cards instead of a data table, since this is the
+   screen an engineer actually lives in on a phone. */
+.engineer-job-cards { display: flex; flex-direction: column; gap: 10px; }
+.engineer-job-card { display: block; width: 100%; border: 1px solid #dfe7eb; border-radius: 10px; background: #fff; padding: 14px 16px; text-align: left; transition: border-color 150ms ease, box-shadow 150ms ease; }
+.engineer-job-card:hover, .engineer-job-card:focus-visible { border-color: #a9d8ea; box-shadow: 0 4px 14px rgba(23,127,168,.1); }
+.engineer-job-card-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.engineer-job-card-top b { font-size: 15px; color: var(--erp-text-primary); }
+.engineer-job-card-customer { margin-top: 6px; color: var(--erp-text-primary); font-size: 14px; font-weight: 600; }
+.engineer-job-card-site { margin-top: 2px; color: var(--erp-text-secondary); font-size: 12px; }
+.engineer-job-card-meta { display: flex; align-items: center; gap: 10px; margin-top: 10px; color: #6d7e8b; font-size: 12px; }
+
+/* Job detail drawer goes edge-to-edge on a phone instead of leaving a backdrop sliver. */
+@media (max-width: 620px) {
+  .jobs-detail-drawer { width: 100vw; height: 100dvh; box-shadow: none; }
+  .jobs-detail-drawer .quote-editor-head { padding: 14px 16px; }
+  .jobs-detail-drawer .invoice-editor-layout { padding: 16px; }
+  .jobs-detail-drawer .quote-editor-actions { max-width: none; width: 100%; }
+  .jobs-detail-drawer .quote-editor-actions > button { flex: 1 1 auto; }
+}
 @media (max-width: 1000px) { .jobs-board .board-layout { grid-template-columns: 190px minmax(0, 1fr); } }
