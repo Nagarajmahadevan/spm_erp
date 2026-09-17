@@ -5,16 +5,18 @@ import Settings from "./Settings";
 import Stock from "./Stock";
 import Leads from "./Leads";
 import Quotations from "./Quotations";
+import Orders from "./Orders";
 import Invoices from "./Invoices";
 import PurchaseOrders from "./PurchaseOrders";
+import Rentals from "./Rentals";
 import DueDates, { dueSummary } from "./DueDates";
-import CustomerInstruments from "./CustomerInstruments";
+import Customers from "./Customers";
 import Jobs from "./Jobs";
 import Attendance from "./Attendance";
 import AdvanceExpense from "./AdvanceExpense";
 import Accounts from "./Accounts";
 import Reports from "./Reports";
-import { useErpStore } from "./erpStore";
+import { useErpStore, type Job } from "./erpStore";
 import { money, prettyDate } from "./erpMasters";
 
 type Role = "Admin" | "Engineer";
@@ -47,26 +49,27 @@ function Icon({ name, size = 18 }: { name: IconName; size?: number }) {
 
 const modules = [
   ["Dashboard", "dashboard", "Overview"],
-  ["Stock", "stock", "Operations"],
-  ["Customer Instruments", "invoice", "Operations"],
-  ["Jobs", "attendance", "Operations"],
-  ["Due Dates", "due", "Operations"],
-  ["Attendance", "attendance", "People"],
-  ["Advance & Expense", "expense", "People"],
   ["Leads", "leads", "Sales"],
   ["Quotations", "quote", "Sales"],
-  ["Purchase Orders", "purchase", "Procurement"],
-  ["Invoices", "invoice", "Finance"],
-  ["Accounts", "accounts", "Finance"],
-  ["Reports", "reports", "Finance"],
+  ["Orders", "purchase", "Sales"],
+  ["Jobs", "attendance", "Operations"],
+  ["Stock", "stock", "Operations"],
+  ["Rentals", "stock", "Operations"],
+  ["Purchases", "purchase", "Operations"],
+  ["Customers", "invoice", "Customers"],
+  ["Invoices", "invoice", "Money"],
+  ["Accounts", "accounts", "Money"],
+  ["Attendance", "attendance", "Team"],
+  ["Expenses", "expense", "Team"],
+  ["Reports", "reports", "Reports"],
 ] as const;
 
-const engineerModules = new Set(["Dashboard", "Attendance", "Advance & Expense", "Stock", "Jobs", "Due Dates"]);
+const engineerModules = new Set(["Jobs", "Expenses"]);
 
 export default function Dashboard() {
   const navigate = useNavigate();
   const [collapsed, setCollapsed] = useState(false);
-  const [role] = useState<Role>("Admin");
+  const [role, setRole] = useState<Role>("Admin");
   const [active, setActive] = useState("Dashboard");
   const [search, setSearch] = useState("");
   const [alertsOpen, setAlertsOpen] = useState(false);
@@ -74,14 +77,23 @@ export default function Dashboard() {
   const [invoiceFocus, setInvoiceFocus] = useState<string | undefined>(undefined);
   const [stockFocus, setStockFocus] = useState<string | undefined>(undefined);
   const [engineerFocus, setEngineerFocus] = useState<string | undefined>(undefined);
+  const [quoteFocus, setQuoteFocus] = useState<string | undefined>(undefined);
+  const [rentalFocus, setRentalFocus] = useState<string | undefined>(undefined);
+  const [poAutoStartLow, setPoAutoStartLow] = useState(false);
+  const [jobPrefill, setJobPrefill] = useState<Partial<Job> | undefined>(undefined);
   const store = useErpStore();
   const due = dueSummary(store);
   const goToJob = (jobId: string) => { setJobFocus(jobId); setActive("Jobs"); };
   const goToInvoice = (invoiceId: string) => { setInvoiceFocus(invoiceId); setActive("Invoices"); };
   const goToStockItem = (itemId: string) => { setStockFocus(itemId); setActive("Stock"); };
-  const goToEngineer = (name: string) => { setEngineerFocus(name); setActive("Advance & Expense"); };
+  const goToEngineer = (name: string) => { setEngineerFocus(name); setActive("Expenses"); };
+  const goToQuote = (quoteId: string) => { setQuoteFocus(quoteId); setActive("Quotations"); };
+  const goToLowStockPO = () => { setPoAutoStartLow(true); setActive("Purchases"); };
+  const goToRentals = (ref?: string) => { setRentalFocus(ref); setActive("Rentals"); };
+  const goToNewJob = (prefill: Partial<Job>) => { setJobPrefill(prefill); setActive("Jobs"); };
   const visibleModules = useMemo(() => modules.filter(([name]) => role === "Admin" || engineerModules.has(name)), [role]);
   const groups = [...new Set(visibleModules.map(([, , group]) => group))];
+  const toggleRole = () => { const next = role === "Admin" ? "Engineer" : "Admin"; setRole(next); setActive(next === "Engineer" ? "Jobs" : "Dashboard"); };
 
   return <div className="erp-app min-h-screen bg-[#f4f6f8] text-[#2a3442]">
     <aside className={`erp-sidebar ${collapsed ? "erp-sidebar--collapsed" : ""}`}>
@@ -90,18 +102,18 @@ export default function Dashboard() {
         <button onClick={() => setCollapsed((value) => !value)} aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"} className="ml-auto rounded-md p-2 text-[#6b7a8d] hover:bg-[#f1f5f7] hover:text-[#2a3442]"><Icon name="menu" /></button>
       </div>
       <nav className="erp-nav" aria-label="Main navigation">
-        {groups.map((group) => <div key={group} className="erp-nav-group">
-          {!collapsed && <p className="erp-nav-label">{group}</p>}
-          {visibleModules.filter(([, , moduleGroup]) => moduleGroup === group).map(([name, icon]) => <button key={name} onClick={() => setActive(name)} className={`erp-nav-item ${active === name ? "erp-nav-item--active" : ""}`} title={collapsed ? name : undefined}>
-            <Icon name={icon as IconName} /><span>{name}</span>{name === "Due Dates" && !collapsed && due.badge > 0 && <b>{due.badge}</b>}
+        {groups.map((group) => { const items = visibleModules.filter(([, , moduleGroup]) => moduleGroup === group); return <div key={group} className="erp-nav-group">
+          {!collapsed && items.length > 1 && <p className="erp-nav-label">{group}</p>}
+          {items.map(([name, icon]) => <button key={name} onClick={() => { setActive(name); setPoAutoStartLow(false); setJobPrefill(undefined); }} className={`erp-nav-item ${active === name ? "erp-nav-item--active" : ""}`} title={collapsed ? name : undefined}>
+            <Icon name={icon as IconName} /><span>{name}</span>
           </button>)}
-        </div>)}
+        </div>; })}
       </nav>
       <div className="erp-sidebar-footer">
-        <button onClick={() => setActive("Settings")} className={`erp-nav-item w-full ${active === "Settings" ? "erp-nav-item--active" : ""}`} title={collapsed ? "Settings" : undefined}><Icon name="settings" /><span>Settings</span></button>
+        {role === "Admin" && <button onClick={() => setActive("Settings")} className={`erp-nav-item w-full ${active === "Settings" ? "erp-nav-item--active" : ""}`} title={collapsed ? "Settings" : undefined}><Icon name="settings" /><span>Settings</span></button>}
         <div className="erp-sidebar-user">
-          <span className="erp-avatar">AK</span>
-          {!collapsed && <span><b>Arun Kumar</b><small>{role}</small></span>}
+          <button onClick={toggleRole} title="Switch role (demo)" className="erp-avatar" style={{ cursor: "pointer" }}>AK</button>
+          {!collapsed && <button onClick={toggleRole} title="Switch role (demo)" className="text-left"><b>Arun Kumar</b><small>{role}</small></button>}
           <button onClick={() => navigate("/login")} title="Sign out" aria-label="Sign out" className="erp-sidebar-signout"><Icon name="arrow" size={15} /></button>
         </div>
       </div>
@@ -116,13 +128,13 @@ export default function Dashboard() {
         </div>
       </header>
       <main className="erp-content">
-        {active === "Settings" ? <Settings /> : active === "Stock" ? <Stock isEngineer={role === "Engineer"} focusItem={stockFocus} /> : active === "Leads" ? <Leads /> : active === "Quotations" ? <Quotations /> : active === "Invoices" ? <Invoices focusInvoice={invoiceFocus} /> : active === "Purchase Orders" ? <PurchaseOrders /> : active === "Due Dates" ? <DueDates isEngineer={role === "Engineer"} /> : active === "Customer Instruments" ? <CustomerInstruments openJob={goToJob} /> : active === "Jobs" ? <Jobs isEngineer={role === "Engineer"} focusJob={jobFocus} /> : active === "Attendance" ? <Attendance /> : active === "Advance & Expense" ? <AdvanceExpense focusEngineer={engineerFocus} /> : active === "Accounts" ? <Accounts openInvoice={goToInvoice} /> : active === "Reports" ? <Reports openInvoice={goToInvoice} openJob={goToJob} openStockItem={goToStockItem} openEngineer={goToEngineer} /> : <>
+        {active === "Settings" ? <Settings /> : active === "Stock" ? <Stock isEngineer={role === "Engineer"} focusItem={stockFocus} onCreatePO={goToLowStockPO} onOpenRental={goToRentals} /> : active === "Leads" ? <Leads openQuote={goToQuote} /> : active === "Quotations" ? <Quotations focusQuote={quoteFocus} /> : active === "Orders" ? <Orders openJob={goToJob} openInvoice={goToInvoice} newJob={goToNewJob} openRentals={goToRentals} /> : active === "Invoices" ? <Invoices focusInvoice={invoiceFocus} /> : active === "Purchases" ? <PurchaseOrders autoStartLow={poAutoStartLow} /> : active === "Rentals" ? <Rentals focus={rentalFocus} /> : active === "Due Dates" ? <DueDates isEngineer={role === "Engineer"} openInvoice={goToInvoice} openJob={goToJob} /> : active === "Customers" ? <Customers openJob={goToJob} openInvoice={goToInvoice} /> : active === "Jobs" ? <Jobs isEngineer={role === "Engineer"} focusJob={jobFocus} newJobPrefill={jobPrefill} openInvoice={goToInvoice} /> : active === "Attendance" ? <Attendance /> : active === "Expenses" ? <AdvanceExpense isEngineer={role === "Engineer"} focusEngineer={engineerFocus} /> : active === "Accounts" ? <Accounts openInvoice={goToInvoice} /> : active === "Reports" ? <Reports openInvoice={goToInvoice} openJob={goToJob} openStockItem={goToStockItem} openEngineer={goToEngineer} /> : <>
         <div className="mb-8 flex flex-wrap items-end justify-between gap-4"><div><p className="erp-secondary-text">{new Intl.DateTimeFormat("en-IN", { weekday: "long", day: "numeric", month: "long" }).format(new Date())}</p><h1>Good morning, Arun</h1><p className="erp-secondary-text mt-1">Here’s a quick view of what needs your attention.</p></div><button className="erp-action">Create quotation <Icon name="arrow" size={16} /></button></div>
         <section className="erp-stats" aria-label="Business summary">
           {[ ["Open quotations", "12", "₹ 6.40 L", "quote", "sales", "↑ 18% vs last week"], ["Pending invoices", "08", "₹ 8.20 L", "invoice", "money", "↑ 6% vs last week"], ["Stock alerts", "04", "Items to review", "stock", "stock", "↑ 2 new alerts"], ["Due this week", "03", "Follow up today", "due", "overdue", "↓ 1 from last week"] ].map(([label, value, detail, icon, tone, trend]) => <article key={label} className="erp-stat"><span className={`erp-stat-icon erp-stat-icon--${tone}`}><Icon name={icon as IconName} /></span><div className="erp-stat-label"><p>{label}</p><small>{detail}</small></div><strong>{value}</strong><em className={`erp-trend erp-trend--${tone}`}>{trend}</em></article>)}
         </section>
         <section className="erp-dashboard-grid">
-          <article className="erp-panel"><div className="erp-panel-head"><div><h2>Today’s priorities</h2><p>Tasks that need a response today</p></div><button className="erp-text-button" onClick={() => setActive("Due Dates")}>View all</button></div>{[["Create invoice", "QT-2026-0827 · Tera Research", "10:30 AM", "Ready to invoice", "blue"], ["Approve purchase order", "PO-24091", "12:00 PM", "Awaiting approval", "amber"], ["Follow up on payment", "Arka Diagnostics", "3:30 PM", "Overdue", "rose"]].map(([task, company, time, status, tone]) => <div className="erp-task" key={task}><span className="erp-task-check" /><div><b>{task}</b><small>{company}</small></div><span className={`erp-chip erp-chip--${tone}`}>{status}</span><time>{time}</time></div>)}<div className="erp-attendance"><div><b>Who’s in today</b><small>18 of 22 team members present</small></div><div className="erp-avatars"><span>AK</span><span>PS</span><span>NR</span><span>+15</span></div></div></article>
+          <article className="erp-panel"><div className="erp-panel-head"><div><h2>Today’s priorities</h2><p>Tasks that need a response today</p></div><button className="erp-text-button" onClick={() => setActive("Due Dates")}>View all</button></div>{[["Create invoice", "QT-2026-0827 · Tera Research", "10:30 AM", "Ready to invoice", "blue"], ["Approve purchase order", "PO-24093", "12:00 PM", "Ready to approve", "amber"], ["Follow up on payment", "Arka Diagnostics", "3:30 PM", "Overdue", "rose"]].map(([task, company, time, status, tone]) => <div className="erp-task" key={task}><span className="erp-task-check" /><div><b>{task}</b><small>{company}</small></div><span className={`erp-chip erp-chip--${tone}`}>{status}</span><time>{time}</time></div>)}<div className="erp-attendance"><div><b>Who’s in today</b><small>18 of 22 team members present</small></div><div className="erp-avatars"><span>AK</span><span>PS</span><span>NR</span><span>+15</span></div></div></article>
           <article className="erp-panel"><div className="erp-panel-head"><div><h2>Attention needed</h2><p>Exceptions across your business</p></div><button className="erp-icon-button"><Icon name="more" /></button></div>{[...due.overdue, ...due.dueToday].slice(0, 4).map((item) => <div className="erp-alert" key={item.id} onClick={() => setActive("Due Dates")}><div><b>{item.title}</b><small>{[item.party, item.amount ? money(item.amount) : null, prettyDate(item.date)].filter(Boolean).join(" · ")}</small></div><span className={`erp-chip erp-chip--${due.overdue.includes(item) ? "rose" : "amber"}`}>{due.overdue.includes(item) ? "Overdue" : "Due today"}</span><Icon name="chevron" size={16} /></div>)}{![...due.overdue, ...due.dueToday].length && <div className="erp-alert"><div><b>Nothing overdue</b><small>Everything is up to date</small></div></div>}<div className="erp-collections"><div><b>Collections by week</b><small>Amount collected</small></div><strong>₹ 12.4 L</strong><div className="erp-bars" aria-label="Collections mini bar chart"><i /><i /><i /><i /><i /></div><div className="erp-bar-labels"><span>W1</span><span>W2</span><span>W3</span><span>W4</span><span>W5</span></div></div></article>
         </section>
         </>}

@@ -1,35 +1,40 @@
 import { useMemo, useState } from "react";
+import qrcode from "qrcode-generator";
+import spmLogo from "@/imports/SPM_Logo.png";
 import { ActionMenu, Overlay, Pagination, useTablePage } from "./ErpUi";
-import { APPROVER, CALIBRATION_LABS, STOCK_LOCATIONS, STOCK_UNITS, WAREHOUSE, customerMaster, customerSites, dateIso, dayDifference, engineers, prettyDate } from "./erpMasters";
+import { APPROVER, CALIBRATION_LABS, COMPANY, STOCK_LOCATIONS, STOCK_UNITS, WAREHOUSE, customerSites, dateIso, dayDifference, engineers, prettyDate, siteById, type Customer } from "./erpMasters";
 import {
-  adjustBalance, applyReceiptToStock, balanceAt, nextEquipmentId, nextEquipmentIds, onOrderFor, orderAfterReceipt, pendingOf, recordEquipmentSale, totalOf, transferBalances, updateStore, useErpStore,
-  type EquipmentHolder, type EquipmentOpStatus, type Individual, type POLine, type PurchaseOrder, type Quantity, type Receipt, type StockItem, type StockMove,
+  addDeliveryChallan, adjustBalance, applyReceiptToStock, balanceAt, nextEquipmentId, nextEquipmentIds, onOrderFor, orderAfterReceipt, pendingOf, recordEquipmentSale, totalOf, transferBalances, updateStore, useErpStore,
+  type DeliveryChallan, type EquipmentHolder, type EquipmentOpStatus, type Individual, type POLine, type PurchaseOrder, type Quantity, type Receipt, type StockItem, type StockMove,
 } from "./erpStore";
 
-type ActionKey = "issue-engineer" | "transfer" | "issue-rent" | "sale" | "usage" | "receive-return" | "calibration-repair" | "adjust";
-const ACTION_LABEL: Record<ActionKey, string> = {
-  "issue-engineer": "Issue to Engineer", transfer: "Transfer Location", "issue-rent": "Issue on Rent", sale: "Record Sale",
+export type ActionKey = "issue-engineer" | "transfer" | "issue-demo" | "sale" | "usage" | "receive-return" | "calibration-repair" | "adjust";
+export const ACTION_LABEL: Record<ActionKey, string> = {
+  "issue-engineer": "Issue to Engineer", transfer: "Transfer Location", "issue-demo": "Issue for Demo", sale: "Record Sale",
   usage: "Record Usage on Job", "receive-return": "Receive Return", "calibration-repair": "Send for Calibration / Repair", adjust: "Adjust Stock",
 };
-const isIndividual = (item: StockItem): item is Individual => "holder" in item;
-const opClass = (status: string) => status.toLowerCase().replace(/ /g, "-");
-const operationLabel = (item: Individual) => item.holder === "Customer" && item.opStatus === "In use" ? "On rent" : item.opStatus;
+export const isIndividual = (item: StockItem): item is Individual => "holder" in item;
+export const opClass = (status: string) => status.toLowerCase().replace(/ /g, "-");
+export const operationLabel = (item: Individual) => item.holder === "Customer" && item.opStatus === "In use" ? "On rent" : item.opStatus;
 const storeQuantity = (item: Quantity) => item.balances.filter((entry) => STOCK_LOCATIONS.includes(entry.location)).reduce((sum, entry) => sum + entry.quantity, 0);
 
-function actionsFor(item: StockItem): ActionKey[] {
+/** Rentals are managed entirely on the Rentals page — an item backed by an active Rental
+ *  record offers no quick actions here, only the "View rental" link (see Detail). */
+function actionsFor(item: StockItem, activeRentalIds: Set<string>): ActionKey[] {
   if (isIndividual(item)) {
     if (item.opStatus === "Sold" || item.opStatus === "Retired") return [];
     if (item.holder === "Store") {
-      if (item.opStatus === "Available") return ["issue-engineer", "transfer", "issue-rent", "sale", "calibration-repair"];
+      if (item.opStatus === "Available") return ["issue-engineer", "transfer", "issue-demo", "sale", "calibration-repair"];
       return ["calibration-repair", "transfer"]; // Damaged / Awaiting calibration, still in the store
     }
-    return ["receive-return"]; // with an engineer, a customer on rent, or at a calibration/repair lab
+    if (item.holder === "Customer" && activeRentalIds.has(item.id)) return [];
+    return ["receive-return"]; // with an engineer, a demo customer, or a calibration/repair lab
   }
   return ["issue-engineer", "transfer", "usage", "sale", "receive-return", "adjust"];
 }
 
-export default function Stock({ isEngineer = false, focusItem }: { isEngineer?: boolean; focusItem?: string }) {
-  const [tab, setTab] = useState<"equipment" | "spares">("equipment");
+export default function Stock({ isEngineer = false, focusItem, onCreatePO, onOpenRental }: { isEngineer?: boolean; focusItem?: string; onCreatePO?: () => void; onOpenRental?: (rentalRef: string) => void }) {
+  const [tab, setTab] = useState<"equipment" | "spares" | "challans">("equipment");
   const [query, setQuery] = useState("");
   const [holderFilter, setHolderFilter] = useState("All");
   const [statusFilter, setStatusFilter] = useState("All statuses");
@@ -38,10 +43,16 @@ export default function Stock({ isEngineer = false, focusItem }: { isEngineer?: 
   const [moreFilters, setMoreFilters] = useState(false);
   const [sort, setSort] = useState("Name A–Z");
   const clearFilters = () => { setQuery(""); setHolderFilter("All"); setStatusFilter("All statuses"); setAlertFilter("All"); setDueSoon(false); };
-  const { individuals, quantities, orders, moves, jobs } = useErpStore();
+  const { individuals, quantities, orders, moves, jobs, customers, deliveryChallans, rentals } = useErpStore();
+  const activeRentalIds = useMemo(() => new Set(rentals.filter((entry) => entry.status === "Active").map((entry) => entry.equipmentId)), [rentals]);
   const [acting, setActing] = useState<{ item: StockItem; action: ActionKey } | null>(null);
   const [detail, setDetail] = useState<StockItem | null>(() => focusItem ? [...individuals, ...quantities].find((item) => item.id === focusItem) ?? null : null);
   const [receiving, setReceiving] = useState(false);
+  const [returnPreset, setReturnPreset] = useState<StockItem | null>(null);
+  const [addingItem, setAddingItem] = useState(false);
+  const [editingItem, setEditingItem] = useState<StockItem | null>(null);
+  const [labelItem, setLabelItem] = useState<Individual | null>(null);
+  const [dcPreview, setDcPreview] = useState<DeliveryChallan | null>(null);
   const [toast, setToast] = useState("");
   const flash = (message: string) => { setToast(message); window.setTimeout(() => setToast(""), 3200); };
 
@@ -57,6 +68,8 @@ export default function Stock({ isEngineer = false, focusItem }: { isEngineer?: 
   ).sort((a, b) => sort === "ID" ? a.id.localeCompare(b.id) : sort === "Lowest stock" ? totalOf(a) - totalOf(b) : a.name.localeCompare(b.name)), [quantities, alertFilter, query, sort]);
   const equipmentPage = useTablePage(equipmentRows, JSON.stringify([query, holderFilter, statusFilter, dueSoon, sort]));
   const sparePage = useTablePage(spareRows, JSON.stringify([query, alertFilter, sort]));
+  const challanRows = useMemo(() => deliveryChallans.filter((entry) => `${entry.number} ${entry.customer} ${entry.reason} ${entry.reference ?? ""}`.toLowerCase().includes(query.toLowerCase())), [deliveryChallans, query]);
+  const challanPage = useTablePage(challanRows, JSON.stringify([query]));
   const activeFilters = [query && `Search: ${query}`, tab === "equipment" && holderFilter !== "All" && `Currently with: ${holderFilter}`, tab === "equipment" && statusFilter !== "All statuses" && `Status: ${statusFilter}`, tab === "equipment" && dueSoon && "Calibration: overdue or within 7 days", tab === "spares" && alertFilter !== "All" && "Low stock"].filter(Boolean);
 
   const counts = useMemo(() => ({
@@ -68,11 +81,12 @@ export default function Stock({ isEngineer = false, focusItem }: { isEngineer?: 
   }), [individuals, quantities]);
 
   return <section className="stock-page">
-    <div className="stock-heading"><div><p className="erp-secondary-text">Operations / Stock</p><h1>Stock</h1></div><div className="stock-head-actions"><button className="erp-action" onClick={() => setReceiving(true)}>Receive stock</button></div></div>
+    <div className="stock-heading"><div><p className="erp-secondary-text">Operations / Stock</p><h1>Stock</h1></div><div className="stock-head-actions">{counts.lowSpares > 0 && onCreatePO && <button className="settings-outline" onClick={onCreatePO}>Create purchase order ({counts.lowSpares} low)</button>}<button className="settings-outline" onClick={() => setAddingItem(true)}>Add item</button><button className="erp-action" onClick={() => setReceiving(true)}>Receive stock</button></div></div>
 
     <div className="stock-tabs">
       <button className={tab === "equipment" ? "is-active" : ""} onClick={() => { setTab("equipment"); setHolderFilter("All"); setStatusFilter("All statuses"); setDueSoon(false); }}>Equipment <span>{individuals.length}</span></button>
       <button className={tab === "spares" ? "is-active" : ""} onClick={() => { setTab("spares"); setAlertFilter("All"); }}>Spares &amp; Consumables <span>{quantities.length}</span></button>
+      <button className={tab === "challans" ? "is-active" : ""} onClick={() => setTab("challans")}>Delivery Challans <span>{deliveryChallans.length}</span></button>
     </div>
 
     <div className="erp-summary-strip stock-overview">
@@ -82,7 +96,7 @@ export default function Stock({ isEngineer = false, focusItem }: { isEngineer?: 
       <button className="leads-stat leads-stat--overdue" onClick={() => { clearFilters(); setTab("spares"); setAlertFilter("Low stock"); }}><span>Low-stock spares</span><b>{counts.lowSpares}</b></button>
     </div>
 
-    <div className="erp-filters">
+    {tab !== "challans" && <div className="erp-filters">
       <label className="erp-search-filter"><span>Search stock</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="ID, equipment, model or serial" /></label>
       {tab === "equipment" ? <>
         <label><span>Currently with</span><select value={holderFilter} onChange={(event) => setHolderFilter(event.target.value)}><option value="All">All locations</option><option value="Store">Office / Store</option><option value="Engineer">Engineer</option><option value="Customer">Customer</option><option value="Calibration/Repair">Calibration / repair</option></select></label>
@@ -90,18 +104,25 @@ export default function Stock({ isEngineer = false, focusItem }: { isEngineer?: 
       </> : <label><span>Stock alert</span><select value={alertFilter} onChange={(event) => setAlertFilter(event.target.value)}><option value="All">All items</option><option value="Low stock">Low stock</option></select></label>}
       <label><span>Sort by</span><select value={sort} onChange={(event) => setSort(event.target.value)}><option>Name A–Z</option><option>ID</option><option>{tab === "equipment" ? "Calibration due" : "Lowest stock"}</option></select></label>
       {tab === "equipment" && <button className="settings-outline" aria-expanded={moreFilters} onClick={() => setMoreFilters(!moreFilters)}>More filters</button>}
-    </div>
+    </div>}
+    {tab === "challans" && <div className="erp-filters"><label className="erp-search-filter"><span>Search challans</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="DC number, customer or reason" /></label></div>}
     {moreFilters && tab === "equipment" && <label className="stock-due-toggle"><input type="checkbox" checked={dueSoon} onChange={(event) => setDueSoon(event.target.checked)} /> Calibration overdue or due within 7 days</label>}
-    {activeFilters.length > 0 && <div className="erp-filter-summary">{activeFilters.map((filter) => <span key={String(filter)}>{filter}</span>)}<button className="erp-record-link" onClick={clearFilters}>Clear all</button></div>}
+    {tab !== "challans" && activeFilters.length > 0 && <div className="erp-filter-summary">{activeFilters.map((filter) => <span key={String(filter)}>{filter}</span>)}<button className="erp-record-link" onClick={clearFilters}>Clear all</button></div>}
     {tab === "equipment" && counts.review > 0 && <p className="stock-review-note">{counts.review} operational item{counts.review === 1 ? "" : "s"} in store need{counts.review === 1 ? "s" : ""} calibration review before a calibration-dependent job. Issue restrictions await SPM confirmation.</p>}
     {tab === "equipment"
       ? <><EquipmentTable items={equipmentPage.pageRows} open={setDetail} /><Pagination total={equipmentRows.length} page={equipmentPage.page} onPage={equipmentPage.setPage} /></>
-      : <><SpareTable items={sparePage.pageRows} orders={orders} open={setDetail} /><Pagination total={spareRows.length} page={sparePage.page} onPage={sparePage.setPage} /></>}
-    {!(tab === "equipment" ? equipmentRows.length : spareRows.length) && <div className="settings-empty"><b>No matching stock items</b><p>Try a different search or clear the filters.</p><button className="settings-outline" onClick={clearFilters}>Clear filters</button></div>}
+      : tab === "spares"
+      ? <><SpareTable items={sparePage.pageRows} orders={orders} open={setDetail} /><Pagination total={spareRows.length} page={sparePage.page} onPage={sparePage.setPage} /></>
+      : <><ChallanTable items={challanPage.pageRows} open={setDcPreview} /><Pagination total={challanRows.length} page={challanPage.page} onPage={challanPage.setPage} /></>}
+    {!(tab === "equipment" ? equipmentRows.length : tab === "spares" ? spareRows.length : challanRows.length) && <div className="settings-empty"><b>{tab === "challans" ? "No delivery challans yet" : "No matching stock items"}</b><p>{tab === "challans" ? "A challan is created automatically whenever stock is sold, rented, put on demo, or a customer's instrument is returned to them." : "Try a different search or clear the filters."}</p>{tab !== "challans" && <button className="settings-outline" onClick={clearFilters}>Clear filters</button>}</div>}
 
-    {detail && <Detail item={detail} moves={moves} close={() => setDetail(null)} act={(action) => { setDetail(null); setActing({ item: detail, action }); }} />}
-    {acting && <ActionModal item={acting.item} action={acting.action} isEngineer={isEngineer} jobs={jobs} individuals={individuals} close={() => setActing(null)} flash={flash} />}
-    {receiving && <ReceiveStockModal close={() => setReceiving(false)} flash={flash} />}
+    {detail && <Detail item={detail} moves={moves} close={() => setDetail(null)} act={(action) => { setDetail(null); if (action === "receive-return") { setReturnPreset(detail); setReceiving(true); } else { setActing({ item: detail, action }); } }} edit={() => { setDetail(null); setEditingItem(detail); }} label={isIndividual(detail) ? () => { setDetail(null); setLabelItem(detail); } : undefined} onCreatePO={onCreatePO} activeRentalIds={activeRentalIds} onOpenRental={onOpenRental} />}
+    {acting && <ActionModal item={acting.item} action={acting.action} isEngineer={isEngineer} jobs={jobs} individuals={individuals} customers={customers} close={() => setActing(null)} flash={flash} />}
+    {receiving && <ReceiveStockModal close={() => { setReceiving(false); setReturnPreset(null); }} flash={flash} presetItem={returnPreset} activeRentalIds={activeRentalIds} />}
+    {addingItem && <ItemFormModal mode="add" individuals={individuals} quantities={quantities} close={() => setAddingItem(false)} flash={flash} />}
+    {editingItem && <ItemFormModal mode="edit" item={editingItem} individuals={individuals} quantities={quantities} close={() => setEditingItem(null)} flash={flash} />}
+    {labelItem && <LabelPreview item={labelItem} close={() => setLabelItem(null)} />}
+    {dcPreview && <DcPreview dc={dcPreview} close={() => setDcPreview(null)} />}
     {toast && <div className="settings-toast" role="status">✓ {toast}</div>}
   </section>;
 }
@@ -125,8 +146,20 @@ function SpareTable({ items, orders, open }: { items: Quantity[]; orders: Purcha
   </tr>; })}</tbody></table></div>;
 }
 
-function Detail({ item, moves, close, act }: { item: StockItem; moves: StockMove[]; close: () => void; act: (action: ActionKey) => void }) {
-  const actions = actionsFor(item);
+function ChallanTable({ items, open }: { items: DeliveryChallan[]; open: (dc: DeliveryChallan) => void }) {
+  return <div className="erp-table-shell"><table className="erp-data-table"><thead><tr><th>DC no.</th><th>Date</th><th>Customer</th><th>Reason</th><th>Items</th><th>Reference</th></tr></thead><tbody>{items.map((dc) => <tr key={dc.id} className="erp-row-clickable" onClick={() => open(dc)}>
+    <td><b>{dc.number}</b></td>
+    <td>{prettyDate(dc.date)}</td>
+    <td>{dc.customer}</td>
+    <td><span className="stock-status">{dc.reason}</span></td>
+    <td>{dc.lines.length} line{dc.lines.length === 1 ? "" : "s"}</td>
+    <td>{dc.reference || "—"}</td>
+  </tr>)}</tbody></table></div>;
+}
+
+function Detail({ item, moves, close, act, edit, label, onCreatePO, activeRentalIds, onOpenRental }: { item: StockItem; moves: StockMove[]; close: () => void; act: (action: ActionKey) => void; edit: () => void; label?: () => void; onCreatePO?: () => void; activeRentalIds: Set<string>; onOpenRental?: (rentalRef: string) => void }) {
+  const actions = actionsFor(item, activeRentalIds);
+  const onRent = isIndividual(item) && item.rentalRef && activeRentalIds.has(item.id);
   const history = moves.filter((entry) => isIndividual(item) ? entry.equipmentId === item.id || (!entry.equipmentId && entry.item === item.name) : entry.item === item.name);
   return <Overlay onClose={close} label={item.name}><aside className="stock-detail"><div className="settings-drawer-head">
     <div><p>{item.id} · {isIndividual(item) ? "Equipment" : "Spares & Consumables"}</p><h2>{isIndividual(item) && <span className="stock-id">{item.id} · </span>}{item.name}</h2>
@@ -135,7 +168,7 @@ function Detail({ item, moves, close, act }: { item: StockItem; moves: StockMove
     <button onClick={close} aria-label="Close">×</button>
   </div>
 
-  {actions.length > 0 && <div className="stock-quick"><ActionMenu label="Stock actions" items={actions.map((key) => ({ label: ACTION_LABEL[key], onSelect: () => act(key) }))} /></div>}
+  <div className="stock-quick"><button className="settings-outline" onClick={edit}>Edit item</button>{label && <button className="settings-outline" onClick={label}>Print label</button>}{onRent && onOpenRental && <button className="settings-outline" onClick={() => onOpenRental(item.rentalRef!)}>View rental</button>}{actions.length > 0 && <ActionMenu label="Stock actions" items={actions.map((key) => ({ label: ACTION_LABEL[key], onSelect: () => act(key) }))} />}</div>
 
   {isIndividual(item) ? <section className="stock-detail-section"><h3>Equipment details</h3><dl className="invoice-facts stock-facts">
     <div><dt>Model</dt><dd>{item.model}</dd></div>
@@ -147,20 +180,20 @@ function Detail({ item, moves, close, act }: { item: StockItem; moves: StockMove
     {item.holder === "Customer" && <div className="invoice-fact-wide"><dt>Rental return due</dt><dd>{item.rentalReturnDue ? prettyDate(item.rentalReturnDue) : "Not set"}{item.rentalRef ? ` · ${item.rentalRef}` : ""}</dd></div>}
     {item.condition && <div className="invoice-fact-wide"><dt>Condition noted</dt><dd>{item.condition}</dd></div>}
     {item.saleRef && <div className="invoice-fact-wide"><dt>Sold</dt><dd>{item.saleRef} — see Customer Instruments for the customer record.</dd></div>}
-  </dl></section> : <section className="stock-detail-section"><h3>Count by location</h3><div className="quantity-counts">{item.balances.map((entry) => <div key={entry.location}><span>{entry.location}</span><b>{entry.quantity}</b></div>)}</div><dl className="stock-quantity-facts"><div><dt>On hand</dt><dd>{totalOf(item)} {item.unit}</dd></div><div><dt>Minimum level</dt><dd>{item.minimum} {item.unit}</dd></div></dl><p className="erp-muted">Low stock means total on hand across all locations is below the minimum. Engineer-held quantities are not available in store.</p>{totalOf(item) < item.minimum && <p className="stock-review-note">Low stock: {item.minimum - totalOf(item)} {item.unit} below minimum.</p>}</section>}
+  </dl></section> : <section className="stock-detail-section"><h3>Count by location</h3><div className="quantity-counts">{item.balances.map((entry) => <div key={entry.location}><span>{entry.location}</span><b>{entry.quantity}</b></div>)}</div><dl className="stock-quantity-facts"><div><dt>On hand</dt><dd>{totalOf(item)} {item.unit}</dd></div><div><dt>Minimum level</dt><dd>{item.minimum} {item.unit}</dd></div></dl><p className="erp-muted">Low stock means total on hand across all locations is below the minimum. Engineer-held quantities are not available in store.</p>{totalOf(item) < item.minimum && <p className="stock-review-note">Low stock: {item.minimum - totalOf(item)} {item.unit} below minimum.{onCreatePO && <button className="erp-record-link" onClick={onCreatePO}>Create purchase order</button>}</p>}</section>}
 
   <section className="stock-detail-section"><h3>Movement history</h3><Timeline moves={history} /></section>
   </aside></Overlay>;
 }
 
-function Timeline({ moves }: { moves: StockMove[] }) {
+export function Timeline({ moves }: { moves: StockMove[] }) {
   if (!moves.length) return <p className="stock-timeline-empty">No movements recorded yet.</p>;
   return <div className="stock-timeline">{moves.map((entry) => <div key={entry.id}><i /><p><b>{entry.action}</b><span>{entry.at} · {entry.who}</span><small>{entry.source} → {entry.destination}{entry.quantity ? ` · ${entry.quantity} units` : ""}{entry.equipmentId ? ` · ${entry.equipmentId}` : ""} · <em>{entry.document || "No document"}</em></small>{entry.reason && <small>Reason: {entry.reason}</small>}</p></div>)}</div>;
 }
 
 /* ─── Stock Actions modal — one action, already chosen from the row ─── */
-function ActionModal({ item, action, isEngineer, jobs, individuals, close, flash }: {
-  item: StockItem; action: ActionKey; isEngineer: boolean; jobs: Store2["jobs"]; individuals: Individual[]; close: () => void; flash: (message: string) => void;
+export function ActionModal({ item, action, isEngineer, jobs, individuals, customers, close, flash }: {
+  item: StockItem; action: ActionKey; isEngineer: boolean; jobs: Store2["jobs"]; individuals: Individual[]; customers: Customer[]; close: () => void; flash: (message: string) => void;
 }) {
   const individual = isIndividual(item);
   const [source, setSource] = useState(!individual && item.balances.length === 1 ? item.balances[0].location : "");
@@ -168,15 +201,13 @@ function ActionModal({ item, action, isEngineer, jobs, individuals, close, flash
   const [quantity, setQuantity] = useState("1");
   const [engineer, setEngineer] = useState(isEngineer ? engineers[0].name : engineers[0].name);
   const [jobId, setJobId] = useState("");
-  const [customer, setCustomer] = useState(customerMaster[0]?.name ?? "");
+  const [customer, setCustomer] = useState(customers[0]?.name ?? "");
   const [siteId, setSiteId] = useState("");
   const [dispatchDate, setDispatchDate] = useState(dateIso());
   const [returnDate, setReturnDate] = useState(dateIso());
   const [saleRef, setSaleRef] = useState("");
   const [destination, setDestination] = useState(STOCK_LOCATIONS.find((loc) => individual ? loc !== item.currentWith : loc !== source) ?? STOCK_LOCATIONS[0]);
   const [lab, setLab] = useState(CALIBRATION_LABS[0]);
-  const [condition, setCondition] = useState<"Good" | "Damaged">("Good");
-  const [remarks, setRemarks] = useState("");
   const [newCount, setNewCount] = useState(String(!individual ? available : 0));
   const [reason, setReason] = useState("");
   const [error, setError] = useState("");
@@ -186,7 +217,6 @@ function ActionModal({ item, action, isEngineer, jobs, individuals, close, flash
 
   const sourceLocations = !individual ? item.balances.map((entry) => entry.location) : [];
   const needsSource = !individual && sourceLocations.length > 1 && ["issue-engineer", "transfer", "usage", "sale"].includes(action);
-  const nonStoreHolders = !individual ? item.balances.filter((entry) => !STOCK_LOCATIONS.includes(entry.location) && entry.quantity > 0) : [];
 
   const submit = () => {
     setError("");
@@ -210,16 +240,17 @@ function ActionModal({ item, action, isEngineer, jobs, individuals, close, flash
           moves: [{ id: `mv-${Date.now()}`, date: dateIso(), at: `${today} · now`, action: ACTION_LABEL[action], source: item.currentWith, destination, equipmentId: item.id, who: APPROVER, document: "", item: item.name }, ...current.moves],
         }));
         flash(`${item.name} transferred to ${destination}.`);
-      } else if (action === "issue-rent") {
+      } else if (action === "issue-demo") {
         if (!siteId) { setError("Pick the customer's site."); return; }
         const site = sites.find((entry) => entry.id === siteId);
-        const rentalRef = `RENT-${String(Date.now()).slice(-4)}`;
+        const demoRef = `DEMO-${String(Date.now()).slice(-4)}`;
         const currentWith = `${customer} · ${site?.name ?? ""}`;
         updateStore((current) => ({
-          individuals: current.individuals.map((row) => row.id === item.id ? { ...row, holder: "Customer" as EquipmentHolder, currentWith, opStatus: "In use" as EquipmentOpStatus, rentalCustomer: customer, rentalSiteId: siteId, rentalReturnDue: returnDate, rentalRef, last: today } : row),
-          moves: [{ id: `mv-${Date.now()}`, date: dispatchDate, at: `${prettyDate(dispatchDate)} · now`, action: ACTION_LABEL[action], source: item.currentWith, destination: currentWith, equipmentId: item.id, who: APPROVER, document: rentalRef, item: item.name }, ...current.moves],
+          individuals: current.individuals.map((row) => row.id === item.id ? { ...row, holder: "Customer" as EquipmentHolder, currentWith, opStatus: "In use" as EquipmentOpStatus, rentalCustomer: customer, rentalSiteId: siteId, rentalReturnDue: returnDate, rentalRef: demoRef, last: today } : row),
+          moves: [{ id: `mv-${Date.now()}`, date: dispatchDate, at: `${prettyDate(dispatchDate)} · now`, action: ACTION_LABEL[action], source: item.currentWith, destination: currentWith, equipmentId: item.id, who: APPROVER, document: demoRef, item: item.name }, ...current.moves],
+          ...addDeliveryChallan(current, { customer, siteId, reason: "Demo", reference: demoRef, date: dispatchDate, lines: [{ description: item.name, serial: item.serial, quantity: 1 }] }),
         }));
-        flash(`${item.name} on rent to ${customer} until ${prettyDate(returnDate)}. It stays SPM-owned.`);
+        flash(`${item.name} on demo to ${customer} until ${prettyDate(returnDate)}. It stays SPM-owned. A delivery challan was created.`);
       } else if (action === "sale") {
         if (!siteId) { setError("Pick the customer's site."); return; }
         const site = sites.find((entry) => entry.id === siteId);
@@ -227,16 +258,9 @@ function ActionModal({ item, action, isEngineer, jobs, individuals, close, flash
         updateStore((current) => ({
           ...recordEquipmentSale(current, item.id, { customer, siteId, saleRef: ref }),
           moves: [{ id: `mv-${Date.now()}`, date: dateIso(), at: `${today} · now`, action: ACTION_LABEL[action], source: item.currentWith, destination: `${customer} · ${site?.name ?? ""}`, equipmentId: item.id, who: APPROVER, document: ref, item: item.name }, ...current.moves],
+          ...addDeliveryChallan(current, { customer, siteId, reason: "Sale", reference: ref, lines: [{ description: item.name, serial: item.serial, quantity: 1 }] }),
         }));
-        flash(`${item.name} sold to ${customer}. It has left available stock and now appears once under Customer Instruments.`);
-      } else if (action === "receive-return") {
-        const opStatus: EquipmentOpStatus = condition === "Damaged" ? "Damaged" : "Available";
-        const label = item.holder === "Customer" ? "Rental return" : item.holder === "Engineer" ? "Return from engineer" : "Return from calibration/repair";
-        updateStore((current) => ({
-          individuals: current.individuals.map((row) => row.id === item.id ? { ...row, holder: "Store" as EquipmentHolder, currentWith: destination, opStatus, condition: remarks || condition, rentalCustomer: undefined, rentalSiteId: undefined, rentalReturnDue: undefined, last: today } : row),
-          moves: [{ id: `mv-${Date.now()}`, date: dateIso(), at: `${today} · now`, action: label, source: item.currentWith, destination, equipmentId: item.id, who: APPROVER, document: "", reason: condition, item: item.name }, ...current.moves],
-        }));
-        flash(condition === "Damaged" ? `${item.name} is back in ${destination} but marked Damaged — it will not show as available to issue.` : `${item.name} is back in ${destination} and available.`);
+        flash(`${item.name} sold to ${customer}. It has left available stock and now appears once under Customer Instruments. A delivery challan was created.`);
       } else if (action === "calibration-repair") {
         updateStore((current) => ({
           individuals: current.individuals.map((row) => row.id === item.id ? { ...row, holder: "Calibration/Repair" as EquipmentHolder, currentWith: lab, opStatus: "Awaiting calibration" as EquipmentOpStatus, last: today } : row),
@@ -265,18 +289,13 @@ function ActionModal({ item, action, isEngineer, jobs, individuals, close, flash
         }));
         flash(`Used ${qty} × ${item.name} on ${job?.number ?? "the job"}.`);
       } else if (action === "sale") {
+        const ref = saleRef.trim() || `SALE-${String(Date.now()).slice(-4)}`;
         updateStore((current) => ({
           quantities: current.quantities.map((row) => row.id === item.id ? { ...row, balances: adjustBalance(row.balances, source, -qty) } : row),
-          moves: [{ id: `mv-${Date.now()}`, date: dateIso(), at: `${today} · now`, action: ACTION_LABEL[action], source, destination: customer || "Customer", quantity: qty, who: APPROVER, document: saleRef, item: item.name, beforeBalance: balanceAt(item, source), afterBalance: balanceAt(item, source) - qty }, ...current.moves],
+          moves: [{ id: `mv-${Date.now()}`, date: dateIso(), at: `${today} · now`, action: ACTION_LABEL[action], source, destination: customer || "Customer", quantity: qty, who: APPROVER, document: ref, item: item.name, beforeBalance: balanceAt(item, source), afterBalance: balanceAt(item, source) - qty }, ...current.moves],
+          ...addDeliveryChallan(current, { customer: customer || "Customer", reason: "Sale", reference: ref, lines: [{ description: item.name, quantity: qty }] }),
         }));
-        flash(`Sold ${qty} × ${item.name}.`);
-      } else if (action === "receive-return") {
-        if (!source) { setError("Pick who is returning it."); return; }
-        updateStore((current) => ({
-          quantities: current.quantities.map((row) => row.id === item.id ? { ...row, balances: transferBalances(row.balances, source, destination, qty) } : row),
-          moves: [{ id: `mv-${Date.now()}`, date: dateIso(), at: `${today} · now`, action: ACTION_LABEL[action], source, destination, quantity: qty, who: APPROVER, document: "", item: item.name, beforeBalance: balanceAt(item, source), afterBalance: balanceAt(item, source) - qty }, ...current.moves],
-        }));
-        flash(`${qty} × ${item.name} returned to ${destination}. Store stock is up; the company-wide total is unchanged.`);
+        flash(`Sold ${qty} × ${item.name}. A delivery challan was created.`);
       } else if (action === "adjust") {
         if (!reason.trim()) { setError("Say why you are adjusting the count."); return; }
         const loc = source || sourceLocations[0] || WAREHOUSE;
@@ -310,15 +329,16 @@ function ActionModal({ item, action, isEngineer, jobs, individuals, close, flash
 
     {action === "transfer" && <label className="settings-field"><span>Transfer to</span><select value={destination} onChange={(event) => setDestination(event.target.value)}>{(individual ? STOCK_LOCATIONS : [...STOCK_LOCATIONS, ...engineers.map((entry) => entry.name)]).filter((loc) => loc !== (individual ? item.currentWith : source)).map((loc) => <option key={loc}>{loc}</option>)}</select></label>}
 
-    {action === "issue-rent" && <>
-      <label className="settings-field"><span>Customer</span><select value={customer} onChange={(event) => { setCustomer(event.target.value); setSiteId(""); }}>{customerMaster.map((entry) => <option key={entry.name}>{entry.name}</option>)}</select></label>
+    {action === "issue-demo" && <>
+      <label className="settings-field"><span>Customer</span><select value={customer} onChange={(event) => { setCustomer(event.target.value); setSiteId(""); }}>{customers.map((entry) => <option key={entry.id}>{entry.name}</option>)}</select></label>
       <label className="settings-field"><span>Site <b className="lead-required">Required</b></span><select value={siteId} onChange={(event) => setSiteId(event.target.value)}><option value="">Pick a site</option>{sites.map((site) => <option key={site.id} value={site.id}>{site.name} · {site.city}</option>)}</select></label>
       <label className="settings-field"><span>Dispatch date</span><input type="date" value={dispatchDate} onChange={(event) => setDispatchDate(event.target.value)} /></label>
       <label className="settings-field"><span>Expected return date</span><input type="date" value={returnDate} onChange={(event) => setReturnDate(event.target.value)} /></label>
+      <p className="ci-derived-note">For a paid rental, use the Rentals page instead — it tracks the monthly rent and raises the invoices.</p>
     </>}
 
     {action === "sale" && <>
-      <label className="settings-field"><span>Customer</span><select value={customer} onChange={(event) => { setCustomer(event.target.value); setSiteId(""); }}>{customerMaster.map((entry) => <option key={entry.name}>{entry.name}</option>)}</select></label>
+      <label className="settings-field"><span>Customer</span><select value={customer} onChange={(event) => { setCustomer(event.target.value); setSiteId(""); }}>{customers.map((entry) => <option key={entry.id}>{entry.name}</option>)}</select></label>
       {individual && <label className="settings-field"><span>Site <b className="lead-required">Required</b></span><select value={siteId} onChange={(event) => setSiteId(event.target.value)}><option value="">Pick a site</option>{sites.map((site) => <option key={site.id} value={site.id}>{site.name} · {site.city}</option>)}</select></label>}
       <label className="settings-field"><span>Sales document reference (optional)</span><input value={saleRef} onChange={(event) => setSaleRef(event.target.value)} placeholder="e.g. INV-2026-0119" /></label>
       {individual && <p className="ci-derived-note">This creates or links the Customer Instrument record automatically and preserves this unit's history.</p>}
@@ -328,16 +348,6 @@ function ActionModal({ item, action, isEngineer, jobs, individuals, close, flash
       <label className="settings-field"><span>Job</span><select value={jobId} onChange={(event) => setJobId(event.target.value)}><option value="">Pick a job</option>{openJobs.map((job) => <option key={job.id} value={job.id}>{job.number} · {job.customer}</option>)}</select></label>
     </>}
 
-    {action === "receive-return" && <>
-      {!individual && <label className="settings-field"><span>Returning from <b className="lead-required">Required</b></span><select value={source} onChange={(event) => setSource(event.target.value)}><option value="">Choose who is returning it</option>{nonStoreHolders.map((entry) => <option key={entry.location} value={entry.location}>{entry.location} · {entry.quantity} to return</option>)}</select></label>}
-      {!individual && source && <label className="settings-field"><span>Quantity</span><input type="number" min="1" max={balanceAt(item as Quantity, source)} value={quantity} onChange={(event) => setQuantity(event.target.value)} /></label>}
-      <label className="settings-field"><span>Destination</span><select value={destination} onChange={(event) => setDestination(event.target.value)}>{STOCK_LOCATIONS.map((loc) => <option key={loc}>{loc}</option>)}</select></label>
-      {individual && <>
-        <div className="stock-choice-row"><button className={condition === "Good" ? "is-selected" : ""} onClick={() => setCondition("Good")}>Good condition</button><button className={condition === "Damaged" ? "is-selected" : ""} onClick={() => setCondition("Damaged")}>Damaged</button></div>
-        <label className="settings-field"><span>Remarks (optional)</span><input value={remarks} onChange={(event) => setRemarks(event.target.value)} placeholder="Condition notes" /></label>
-        {condition === "Damaged" && <p className="po-start-hint">Damaged equipment returns to the store but will not be available to issue until it is repaired.</p>}
-      </>}
-    </>}
 
     {action === "calibration-repair" && <label className="settings-field"><span>Send to</span><select value={lab} onChange={(event) => setLab(event.target.value)}>{CALIBRATION_LABS.map((entry) => <option key={entry}>{entry}</option>)}</select></label>}
 
@@ -349,29 +359,97 @@ function ActionModal({ item, action, isEngineer, jobs, individuals, close, flash
     </>}
 
     {error && <p className="stock-count-error">{error}</p>}
-    {isIndividual(item) && ["issue-engineer", "issue-rent"].includes(action) && (!item.calibrationDue || dayDifference(item.calibrationDue) < 0) && <p className="stock-review-note">Needs review: calibration is overdue or not recorded. Confirm suitability before issue; SPM issue restrictions are not yet configured.</p>}
+    {isIndividual(item) && ["issue-engineer", "issue-demo"].includes(action) && (!item.calibrationDue || dayDifference(item.calibrationDue) < 0) && <p className="stock-review-note">Needs review: calibration is overdue or not recorded. Confirm suitability before issue; SPM issue restrictions are not yet configured.</p>}
     <div className="stock-move-footer"><button className="settings-outline" onClick={close}>Cancel</button><button className="erp-action" onClick={submit}>Confirm</button></div>
   </section></Overlay>;
 }
 
-/* ─── Receive stock — fields depend on the reason ─── */
-type ReceiveReason = "Purchase Receipt" | "Return from Engineer" | "Rental Return" | "Return from Calibration / Repair" | "Opening Stock";
-function ReceiveStockModal({ close, flash }: { close: () => void; flash: (message: string) => void }) {
+/* ─── Receive stock — fields depend on the reason. Every kind of return (from an engineer, a
+ *  rental customer, or a calibration/repair lab) goes through the one ReturnFields component
+ *  below — this is the single place stock is received back into the store. ─── */
+type ReceiveReason = "Purchase Receipt" | "Return" | "Opening Stock";
+function ReceiveStockModal({ close, flash, presetItem, activeRentalIds }: { close: () => void; flash: (message: string) => void; presetItem?: StockItem | null; activeRentalIds: Set<string> }) {
   const { orders, individuals, quantities } = useErpStore();
-  const [reason, setReason] = useState<ReceiveReason>("Purchase Receipt");
+  const [reason, setReason] = useState<ReceiveReason>(presetItem ? "Return" : "Purchase Receipt");
 
   return <Overlay onClose={close} label="Receive stock"><section className="stock-move-modal stock-receive-modal" role="dialog" aria-modal="true" aria-labelledby="receive-title" onClick={(event) => event.stopPropagation()}>
     <button className="stock-modal-close" onClick={close} aria-label="Close">×</button>
     <p>New stock</p><h2 id="receive-title">Receive stock</h2>
     <label className="settings-field"><span>Reason</span><select value={reason} onChange={(event) => setReason(event.target.value as ReceiveReason)}>
-      <option>Purchase Receipt</option><option>Return from Engineer</option><option>Rental Return</option><option>Return from Calibration / Repair</option><option>Opening Stock</option>
+      <option>Purchase Receipt</option><option>Return</option><option>Opening Stock</option>
     </select></label>
     {reason === "Purchase Receipt" && <PurchaseReceiptFields orders={orders} individuals={individuals} close={close} flash={flash} />}
-    {reason === "Return from Engineer" && <EngineerReturnFields individuals={individuals} quantities={quantities} close={close} flash={flash} />}
-    {reason === "Rental Return" && <RentalReturnFields individuals={individuals} close={close} flash={flash} />}
-    {reason === "Return from Calibration / Repair" && <CalibrationReturnFields individuals={individuals} close={close} flash={flash} />}
-    {reason === "Opening Stock" && <OpeningStockFields individuals={individuals} quantities={quantities} close={close} flash={flash} />}
+    {reason === "Return" && <ReturnFields individuals={individuals} quantities={quantities} presetItem={presetItem ?? null} close={close} flash={flash} activeRentalIds={activeRentalIds} />}
+    {reason === "Opening Stock" && <OpeningStockFields quantities={quantities} close={close} flash={flash} />}
   </section></Overlay>;
+}
+
+/* Any equipment away from the store (with an engineer, a demo customer, or a calibration/repair
+ * lab) or any spare balance held outside a store location. Equipment on an active rental is
+ * excluded — that return happens on the Rentals page. */
+export function ReturnFields({ individuals, quantities, presetItem, close, flash, activeRentalIds }: { individuals: Individual[]; quantities: Quantity[]; presetItem: StockItem | null; close: () => void; flash: (message: string) => void; activeRentalIds: Set<string> }) {
+  const [kind, setKind] = useState<"equipment" | "spares">(presetItem && !isIndividual(presetItem) ? "spares" : "equipment");
+  const away = individuals.filter((entry) => entry.holder !== "Store" && entry.opStatus !== "Sold" && entry.opStatus !== "Retired" && !activeRentalIds.has(entry.id));
+  const [equipmentId, setEquipmentId] = useState(presetItem && isIndividual(presetItem) ? presetItem.id : "");
+  const item = away.find((entry) => entry.id === equipmentId);
+  const [condition, setCondition] = useState<"Good" | "Damaged">("Good");
+  const [destination, setDestination] = useState(WAREHOUSE);
+  const [remarks, setRemarks] = useState("");
+  const [calibrationDone, setCalibrationDone] = useState(false);
+  const [nextDue, setNextDue] = useState(dateIso());
+
+  const [spareId, setSpareId] = useState(presetItem && !isIndividual(presetItem) ? presetItem.id : "");
+  const spareItem = quantities.find((entry) => entry.id === spareId);
+  const nonStoreHolders = spareItem ? spareItem.balances.filter((entry) => !STOCK_LOCATIONS.includes(entry.location) && entry.quantity > 0) : [];
+  const [source, setSource] = useState("");
+  const [quantity, setQuantity] = useState("1");
+  const available = spareItem ? balanceAt(spareItem, source) : 0;
+
+  const returnLabel = (holder: EquipmentHolder) => holder === "Customer" ? "Rental return" : holder === "Engineer" ? "Return from engineer" : "Return from calibration/repair";
+
+  const submitEquipment = () => {
+    if (!item) return;
+    const opStatus: EquipmentOpStatus = condition === "Damaged" ? "Damaged" : "Available";
+    updateStore((current) => ({
+      individuals: current.individuals.map((row) => row.id === item.id ? { ...row, holder: "Store" as EquipmentHolder, currentWith: destination, opStatus, condition: remarks || condition, rentalCustomer: undefined, rentalSiteId: undefined, rentalReturnDue: undefined, calibrationDue: item.holder === "Calibration/Repair" && calibrationDone ? nextDue : row.calibrationDue, last: prettyDate(dateIso()) } : row),
+      moves: [{ id: `mv-${Date.now()}`, date: dateIso(), at: `${prettyDate(dateIso())} · now`, action: returnLabel(item.holder), source: item.currentWith, destination, equipmentId: item.id, who: APPROVER, document: item.rentalRef ?? "", reason: item.holder === "Calibration/Repair" ? (calibrationDone ? "Calibration completed" : "Repair only — calibration date unchanged") : condition, item: item.name }, ...current.moves],
+    }));
+    close(); flash(condition === "Damaged" ? `${item.name} is back in ${destination} but marked Damaged — it will not show as available to issue.` : `${item.name} is back in ${destination} and available.${item.holder === "Calibration/Repair" && calibrationDone ? ` Next calibration set to ${prettyDate(nextDue)}.` : ""}`);
+  };
+  const submitSpares = () => {
+    if (!spareItem || Number(quantity) <= 0 || Number(quantity) > available) return;
+    updateStore((current) => ({
+      quantities: current.quantities.map((row) => row.id === spareItem.id ? { ...row, balances: transferBalances(row.balances, source, destination, Number(quantity)) } : row),
+      moves: [{ id: `mv-${Date.now()}`, date: dateIso(), at: `${prettyDate(dateIso())} · now`, action: "Receive Return", source, destination, quantity: Number(quantity), who: APPROVER, document: "", item: spareItem.name }, ...current.moves],
+    }));
+    close(); flash(`${quantity} × ${spareItem.name} returned from ${source}. Store stock is up; the company-wide total is unchanged.`);
+  };
+
+  return <>
+    {!presetItem && <div className="stock-choice-row"><button className={kind === "equipment" ? "is-selected" : ""} onClick={() => setKind("equipment")}>Equipment</button><button className={kind === "spares" ? "is-selected" : ""} onClick={() => setKind("spares")}>Spares &amp; Consumables</button></div>}
+    {kind === "equipment" ? <>
+      <label className="settings-field"><span>Which item <b className="lead-required">Required</b></span><select value={equipmentId} onChange={(event) => setEquipmentId(event.target.value)} disabled={!!presetItem}><option value="">{away.length ? "Pick an item that is away" : "Nothing is away from the store"}</option>{away.map((entry) => <option key={entry.id} value={entry.id}>{entry.id} · {entry.name} · with {entry.currentWith}</option>)}</select></label>
+      {item && <>
+        <div className="stock-choice-row"><button className={condition === "Good" ? "is-selected" : ""} onClick={() => setCondition("Good")}>Good condition</button><button className={condition === "Damaged" ? "is-selected" : ""} onClick={() => setCondition("Damaged")}>Damaged</button></div>
+        <label className="settings-field"><span>Remarks (optional)</span><input value={remarks} onChange={(event) => setRemarks(event.target.value)} placeholder="Condition notes" /></label>
+        <label className="settings-field"><span>Destination</span><select value={destination} onChange={(event) => setDestination(event.target.value)}>{STOCK_LOCATIONS.map((entry) => <option key={entry}>{entry}</option>)}</select></label>
+        {item.holder === "Calibration/Repair" && <>
+          <label className="stock-due-toggle"><input type="checkbox" checked={calibrationDone} onChange={(event) => setCalibrationDone(event.target.checked)} /> A calibration was completed — set a new due date</label>
+          {calibrationDone && <label className="settings-field"><span>Next calibration due</span><input type="date" value={nextDue} onChange={(event) => setNextDue(event.target.value)} /></label>}
+        </>}
+        {condition === "Damaged" && <p className="po-start-hint">Damaged equipment returns to the store but will not be available to issue until it is repaired.</p>}
+        <div className="invoice-payment-footer"><span>{condition === "Damaged" ? "Will not be available to issue" : "Will become available"}</span><div><button className="settings-outline" onClick={close}>Cancel</button><button className="erp-action" onClick={submitEquipment}>Receive return</button></div></div>
+      </>}
+    </> : <>
+      <label className="settings-field"><span>Which spare <b className="lead-required">Required</b></span><select value={spareId} onChange={(event) => { setSpareId(event.target.value); setSource(""); }} disabled={!!presetItem}><option value="">Pick a spare</option>{quantities.filter((entry) => entry.balances.some((balance) => !STOCK_LOCATIONS.includes(balance.location) && balance.quantity > 0)).map((entry) => <option key={entry.id} value={entry.id}>{entry.id} · {entry.name}</option>)}</select></label>
+      {spareItem && <>
+        <label className="settings-field"><span>Returning from <b className="lead-required">Required</b></span><select value={source} onChange={(event) => setSource(event.target.value)}><option value="">Choose who is returning it</option>{nonStoreHolders.map((entry) => <option key={entry.location} value={entry.location}>{entry.location} · {entry.quantity} to return</option>)}</select></label>
+        {source && <label className="settings-field"><span>Quantity</span><input type="number" min="1" max={available} value={quantity} onChange={(event) => setQuantity(event.target.value)} /></label>}
+        <label className="settings-field"><span>Destination</span><select value={destination} onChange={(event) => setDestination(event.target.value)}>{STOCK_LOCATIONS.map((entry) => <option key={entry}>{entry}</option>)}</select></label>
+        <div className="invoice-payment-footer"><span>Store stock rises; company total unchanged</span><div><button className="settings-outline" onClick={close}>Cancel</button><button className="erp-action" disabled={!source || Number(quantity) > available || Number(quantity) <= 0} onClick={submitSpares}>Receive return</button></div></div>
+      </>}
+    </>}
+  </>;
 }
 
 function PurchaseReceiptFields({ orders, individuals, close, flash }: { orders: PurchaseOrder[]; individuals: Individual[]; close: () => void; flash: (message: string) => void }) {
@@ -424,182 +502,167 @@ function PurchaseReceiptFields({ orders, individuals, close, flash }: { orders: 
   </>;
 }
 
-function EngineerReturnFields({ individuals, quantities, close, flash }: { individuals: Individual[]; quantities: Quantity[]; close: () => void; flash: (message: string) => void }) {
-  const [engineerName, setEngineerName] = useState(engineers[0].name);
-  const [kind, setKind] = useState<"equipment" | "spares">("equipment");
-  const held = individuals.filter((item) => item.holder === "Engineer" && item.currentWith === engineerName);
-  const [equipmentId, setEquipmentId] = useState("");
-  const [condition, setCondition] = useState<"Good" | "Damaged">("Good");
-  const [destination, setDestination] = useState(WAREHOUSE);
-  const [spareId, setSpareId] = useState("");
-  const [quantity, setQuantity] = useState("1");
-  const spareItem = quantities.find((entry) => entry.id === spareId);
-  const available = spareItem ? balanceAt(spareItem, engineerName) : 0;
-
-  const submitEquipment = () => {
-    const item = held.find((entry) => entry.id === equipmentId);
-    if (!item) return;
-    const opStatus: EquipmentOpStatus = condition === "Damaged" ? "Damaged" : "Available";
-    updateStore((current) => ({
-      individuals: current.individuals.map((row) => row.id === item.id ? { ...row, holder: "Store" as EquipmentHolder, currentWith: destination, opStatus, condition, last: prettyDate(dateIso()) } : row),
-      moves: [{ id: `mv-${Date.now()}`, date: dateIso(), at: `${prettyDate(dateIso())} · now`, action: "Return from engineer", source: engineerName, destination, equipmentId: item.id, who: APPROVER, document: "", reason: condition, item: item.name }, ...current.moves],
-    }));
-    close(); flash(`${item.name} received back from ${engineerName} into ${destination}.`);
-  };
-  const submitSpares = () => {
-    if (!spareItem || Number(quantity) <= 0 || Number(quantity) > available) return;
-    updateStore((current) => ({
-      quantities: current.quantities.map((row) => row.id === spareItem.id ? { ...row, balances: transferBalances(row.balances, engineerName, destination, Number(quantity)) } : row),
-      moves: [{ id: `mv-${Date.now()}`, date: dateIso(), at: `${prettyDate(dateIso())} · now`, action: "Return from engineer", source: engineerName, destination, quantity: Number(quantity), who: APPROVER, document: "", item: spareItem.name }, ...current.moves],
-    }));
-    close(); flash(`${quantity} × ${spareItem.name} returned from ${engineerName}. Store stock is up; the total is unchanged.`);
-  };
-
-  return <>
-    <label className="settings-field"><span>Engineer</span><select value={engineerName} onChange={(event) => { setEngineerName(event.target.value); setEquipmentId(""); setSpareId(""); }}>{engineers.map((entry) => <option key={entry.name}>{entry.name}</option>)}</select></label>
-    <div className="stock-choice-row"><button className={kind === "equipment" ? "is-selected" : ""} onClick={() => setKind("equipment")}>Equipment</button><button className={kind === "spares" ? "is-selected" : ""} onClick={() => setKind("spares")}>Spares &amp; Consumables</button></div>
-    {kind === "equipment" ? <>
-      <label className="settings-field"><span>Which item <b className="lead-required">Required</b></span><select value={equipmentId} onChange={(event) => setEquipmentId(event.target.value)}><option value="">{held.length ? "Pick an item" : `${engineerName} has nothing checked out`}</option>{held.map((item) => <option key={item.id} value={item.id}>{item.id} · {item.name}</option>)}</select></label>
-      {equipmentId && <>
-        <div className="stock-choice-row"><button className={condition === "Good" ? "is-selected" : ""} onClick={() => setCondition("Good")}>Good condition</button><button className={condition === "Damaged" ? "is-selected" : ""} onClick={() => setCondition("Damaged")}>Damaged</button></div>
-        <label className="settings-field"><span>Destination</span><select value={destination} onChange={(event) => setDestination(event.target.value)}>{STOCK_LOCATIONS.map((entry) => <option key={entry}>{entry}</option>)}</select></label>
-        <div className="invoice-payment-footer"><span>{condition === "Damaged" ? "Will not be available to issue" : "Will become available"}</span><div><button className="settings-outline" onClick={close}>Cancel</button><button className="erp-action" onClick={submitEquipment}>Receive return</button></div></div>
-      </>}
-    </> : <>
-      <label className="settings-field"><span>Which spare <b className="lead-required">Required</b></span><select value={spareId} onChange={(event) => setSpareId(event.target.value)}><option value="">Pick a spare</option>{quantities.filter((entry) => balanceAt(entry, engineerName) > 0).map((entry) => <option key={entry.id} value={entry.id}>{entry.name} · {balanceAt(entry, engineerName)} with {engineerName}</option>)}</select></label>
-      {spareItem && <>
-        <label className="settings-field"><span>Quantity</span><input type="number" min="1" max={available} value={quantity} onChange={(event) => setQuantity(event.target.value)} /></label>
-        <label className="settings-field"><span>Destination</span><select value={destination} onChange={(event) => setDestination(event.target.value)}>{STOCK_LOCATIONS.map((entry) => <option key={entry}>{entry}</option>)}</select></label>
-        <div className="invoice-payment-footer"><span>Store stock rises; company total unchanged</span><div><button className="settings-outline" onClick={close}>Cancel</button><button className="erp-action" disabled={Number(quantity) > available || Number(quantity) <= 0} onClick={submitSpares}>Receive return</button></div></div>
-      </>}
-    </>}
-  </>;
-}
-
-function RentalReturnFields({ individuals, close, flash }: { individuals: Individual[]; close: () => void; flash: (message: string) => void }) {
-  const onRent = individuals.filter((item) => item.holder === "Customer" && item.opStatus !== "Sold");
-  const [equipmentId, setEquipmentId] = useState("");
-  const [condition, setCondition] = useState<"Good" | "Damaged">("Good");
-  const [destination, setDestination] = useState(WAREHOUSE);
-  const [remarks, setRemarks] = useState("");
-  const item = onRent.find((entry) => entry.id === equipmentId);
-
-  const submit = () => {
-    if (!item) return;
-    const opStatus: EquipmentOpStatus = condition === "Damaged" ? "Damaged" : "Available";
-    updateStore((current) => ({
-      individuals: current.individuals.map((row) => row.id === item.id ? { ...row, holder: "Store" as EquipmentHolder, currentWith: destination, opStatus, condition: remarks || condition, rentalCustomer: undefined, rentalSiteId: undefined, rentalReturnDue: undefined, last: prettyDate(dateIso()) } : row),
-      moves: [{ id: `mv-${Date.now()}`, date: dateIso(), at: `${prettyDate(dateIso())} · now`, action: "Rental return", source: item.currentWith, destination, equipmentId: item.id, who: APPROVER, document: item.rentalRef ?? "", reason: condition, item: item.name }, ...current.moves],
-    }));
-    close(); flash(condition === "Damaged" ? `${item.name} returned from rental but marked Damaged — not available to issue.` : `${item.name} returned from rental and back in ${destination}.`);
-  };
-
-  return <>
-    <label className="settings-field"><span>Which rental <b className="lead-required">Required</b></span><select value={equipmentId} onChange={(event) => setEquipmentId(event.target.value)}><option value="">Pick an item on rent</option>{onRent.map((entry) => <option key={entry.id} value={entry.id}>{entry.id} · {entry.name} · {entry.currentWith}</option>)}</select></label>
-    {item && <>
-      <div className="stock-choice-row"><button className={condition === "Good" ? "is-selected" : ""} onClick={() => setCondition("Good")}>Good condition</button><button className={condition === "Damaged" ? "is-selected" : ""} onClick={() => setCondition("Damaged")}>Damaged</button></div>
-      <label className="settings-field"><span>Remarks (optional)</span><input value={remarks} onChange={(event) => setRemarks(event.target.value)} placeholder="Condition notes" /></label>
-      <label className="settings-field"><span>Destination</span><select value={destination} onChange={(event) => setDestination(event.target.value)}>{STOCK_LOCATIONS.map((entry) => <option key={entry}>{entry}</option>)}</select></label>
-      <div className="invoice-payment-footer"><span>{condition === "Damaged" ? "Will not be available to issue" : "Will become available"}</span><div><button className="settings-outline" onClick={close}>Cancel</button><button className="erp-action" onClick={submit}>Receive return</button></div></div>
-    </>}
-  </>;
-}
-
-function CalibrationReturnFields({ individuals, close, flash }: { individuals: Individual[]; close: () => void; flash: (message: string) => void }) {
-  const outForCal = individuals.filter((item) => item.holder === "Calibration/Repair");
-  const [equipmentId, setEquipmentId] = useState("");
-  const [condition, setCondition] = useState<"Good" | "Damaged">("Good");
-  const [destination, setDestination] = useState(WAREHOUSE);
-  const [remarks, setRemarks] = useState("");
-  const [calibrationDone, setCalibrationDone] = useState(false);
-  const [nextDue, setNextDue] = useState(dateIso());
-  const item = outForCal.find((entry) => entry.id === equipmentId);
-
-  const submit = () => {
-    if (!item) return;
-    const opStatus: EquipmentOpStatus = condition === "Damaged" ? "Damaged" : "Available";
-    updateStore((current) => ({
-      individuals: current.individuals.map((row) => row.id === item.id ? { ...row, holder: "Store" as EquipmentHolder, currentWith: destination, opStatus, condition: remarks || condition, calibrationDue: calibrationDone ? nextDue : row.calibrationDue, last: prettyDate(dateIso()) } : row),
-      moves: [{ id: `mv-${Date.now()}`, date: dateIso(), at: `${prettyDate(dateIso())} · now`, action: "Return from calibration/repair", source: item.currentWith, destination, equipmentId: item.id, who: APPROVER, document: "", reason: calibrationDone ? "Calibration completed" : "Repair only — calibration date unchanged", item: item.name }, ...current.moves],
-    }));
-    close(); flash(`${item.name} back in ${destination}.${calibrationDone ? ` Next calibration set to ${prettyDate(nextDue)}.` : " Calibration date left unchanged — this was a repair, not a calibration."}`);
-  };
-
-  return <>
-    <label className="settings-field"><span>Which item <b className="lead-required">Required</b></span><select value={equipmentId} onChange={(event) => setEquipmentId(event.target.value)}><option value="">Pick an item</option>{outForCal.map((entry) => <option key={entry.id} value={entry.id}>{entry.id} · {entry.name} · at {entry.currentWith}</option>)}</select></label>
-    {item && <>
-      <div className="stock-choice-row"><button className={condition === "Good" ? "is-selected" : ""} onClick={() => setCondition("Good")}>Good condition</button><button className={condition === "Damaged" ? "is-selected" : ""} onClick={() => setCondition("Damaged")}>Damaged</button></div>
-      <label className="settings-field"><span>Remarks (optional)</span><input value={remarks} onChange={(event) => setRemarks(event.target.value)} placeholder="Condition notes" /></label>
-      <label className="settings-field"><span>Destination</span><select value={destination} onChange={(event) => setDestination(event.target.value)}>{STOCK_LOCATIONS.map((entry) => <option key={entry}>{entry}</option>)}</select></label>
-      <label className="stock-due-toggle"><input type="checkbox" checked={calibrationDone} onChange={(event) => setCalibrationDone(event.target.checked)} /> A calibration was completed — set a new due date</label>
-      {calibrationDone && <label className="settings-field"><span>Next calibration due</span><input type="date" value={nextDue} onChange={(event) => setNextDue(event.target.value)} /></label>}
-      {!calibrationDone && <p className="ci-derived-note">Leave this unchecked for a plain repair — the calibration schedule stays exactly as it was.</p>}
-      <div className="invoice-payment-footer"><span>{condition === "Damaged" ? "Will not be available to issue" : "Will become available"}</span><div><button className="settings-outline" onClick={close}>Cancel</button><button className="erp-action" onClick={submit}>Receive return</button></div></div>
-    </>}
-  </>;
-}
-
-function OpeningStockFields({ individuals, quantities, close, flash }: { individuals: Individual[]; quantities: Quantity[]; close: () => void; flash: (message: string) => void }) {
-  const [kind, setKind] = useState<"equipment" | "spares">("equipment");
-  const [name, setName] = useState(""); const [model, setModel] = useState(""); const [serial, setSerial] = useState("");
-  const [calibrationDue, setCalibrationDue] = useState("");
+/* Tops up an existing spare code only — creating a new equipment unit or a new spare code
+ * happens through "Add item" so there is one place that mints new stock codes. */
+function OpeningStockFields({ quantities, close, flash }: { quantities: Quantity[]; close: () => void; flash: (message: string) => void }) {
   const [destination, setDestination] = useState(WAREHOUSE);
   const [date, setDate] = useState(dateIso());
   const [note, setNote] = useState("");
-  const [spareId, setSpareId] = useState("");
-  const [newSpareName, setNewSpareName] = useState(""); const [unit, setUnit] = useState(STOCK_UNITS[0]); const [minimum, setMinimum] = useState("10");
+  const [spareId, setSpareId] = useState(quantities[0]?.id ?? "");
   const [quantity, setQuantity] = useState("1");
-  const generatedId = useMemo(() => nextEquipmentId(individuals), [individuals]);
 
-  const submitEquipment = () => {
-    if (!name.trim()) return;
-    updateStore((current) => ({
-      individuals: [{ id: generatedId, name: name.trim(), model: model.trim(), serial: serial.trim() || `INTERNAL-${generatedId}`, category: "Instruments", holder: "Store", currentWith: destination, opStatus: "Available", calibrationDue: calibrationDue || undefined, last: prettyDate(date) }, ...current.individuals],
-      moves: [{ id: `mv-${Date.now()}`, date, at: `${prettyDate(date)} · now`, action: "Opening stock", source: "Opening balance", destination, equipmentId: generatedId, who: APPROVER, document: note, item: name.trim() }, ...current.moves],
-    }));
-    close(); flash(`${name} added as ${generatedId} in ${destination}.`);
-  };
-  const submitSpares = () => {
+  const submit = () => {
     const qty = Number(quantity) || 0;
-    if (qty <= 0) return;
-    if (spareId) {
-      updateStore((current) => ({
-        quantities: current.quantities.map((row) => row.id === spareId ? { ...row, balances: adjustBalance(row.balances, destination, qty) } : row),
-        moves: [{ id: `mv-${Date.now()}`, date, at: `${prettyDate(date)} · now`, action: "Opening stock", source: "Opening balance", destination, quantity: qty, who: APPROVER, document: note, item: quantities.find((entry) => entry.id === spareId)?.name ?? "" }, ...current.moves],
-      }));
-      close(); flash(`Opening stock of ${qty} added to ${destination}.`);
-    } else {
-      if (!newSpareName.trim()) return;
-      const highest = Math.max(0, ...quantities.map((entry) => Number(entry.id.split("-").at(-1)) || 0));
-      const id = `SP-${String(highest + 1).padStart(3, "0")}`;
-      updateStore((current) => ({
-        quantities: [{ id, name: newSpareName.trim(), category: "Spares", unit, minimum: Number(minimum) || 0, balances: [{ location: destination, quantity: qty }] }, ...current.quantities],
-        moves: [{ id: `mv-${Date.now()}`, date, at: `${prettyDate(date)} · now`, action: "Opening stock", source: "Opening balance", destination, quantity: qty, who: APPROVER, document: note, item: newSpareName.trim() }, ...current.moves],
-      }));
-      close(); flash(`${newSpareName} added as ${id} with an opening balance of ${qty} in ${destination}.`);
-    }
+    if (qty <= 0 || !spareId) return;
+    updateStore((current) => ({
+      quantities: current.quantities.map((row) => row.id === spareId ? { ...row, balances: adjustBalance(row.balances, destination, qty) } : row),
+      moves: [{ id: `mv-${Date.now()}`, date, at: `${prettyDate(date)} · now`, action: "Opening stock", source: "Opening balance", destination, quantity: qty, who: APPROVER, document: note, item: quantities.find((entry) => entry.id === spareId)?.name ?? "" }, ...current.moves],
+    }));
+    close(); flash(`Opening stock of ${qty} added to ${destination}.`);
   };
 
   return <>
-    <div className="stock-choice-row"><button className={kind === "equipment" ? "is-selected" : ""} onClick={() => setKind("equipment")}>Equipment</button><button className={kind === "spares" ? "is-selected" : ""} onClick={() => setKind("spares")}>Spares &amp; Consumables</button></div>
-    {kind === "equipment" ? <>
-      <p className="po-start-hint">Internal ID {generatedId} will be generated for this unit.</p>
-      <label className="settings-field"><span>Equipment name <b className="lead-required">Required</b></span><input value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. Airborne Particle Counter" /></label>
-      <label className="settings-field"><span>Make / model</span><input value={model} onChange={(event) => setModel(event.target.value)} /></label>
-      <label className="settings-field"><span>Serial number</span><input value={serial} onChange={(event) => setSerial(event.target.value)} placeholder="Leave blank to use the generated internal ID" /></label>
-      <label className="settings-field"><span>Calibration due (optional)</span><input type="date" value={calibrationDue} onChange={(event) => setCalibrationDue(event.target.value)} /></label>
-    </> : <>
-      <label className="settings-field"><span>Existing stock code</span><select value={spareId} onChange={(event) => setSpareId(event.target.value)}><option value="">— Add a new stock code instead —</option>{quantities.map((entry) => <option key={entry.id} value={entry.id}>{entry.id} · {entry.name}</option>)}</select></label>
-      {!spareId && <><label className="settings-field"><span>New item name <b className="lead-required">Required</b></span><input value={newSpareName} onChange={(event) => setNewSpareName(event.target.value)} /></label>
-        <label className="settings-field"><span>Unit</span><select value={unit} onChange={(event) => setUnit(event.target.value)}>{STOCK_UNITS.map((entry) => <option key={entry}>{entry}</option>)}</select></label>
-        <label className="settings-field"><span>Minimum stock level</span><input type="number" min="0" value={minimum} onChange={(event) => setMinimum(event.target.value)} /></label></>}
-      <label className="settings-field"><span>Quantity</span><input type="number" min="1" value={quantity} onChange={(event) => setQuantity(event.target.value)} /></label>
-    </>}
+    <label className="settings-field"><span>Stock code <b className="lead-required">Required</b></span><select value={spareId} onChange={(event) => setSpareId(event.target.value)}>{quantities.length ? quantities.map((entry) => <option key={entry.id} value={entry.id}>{entry.id} · {entry.name}</option>) : <option value="">No spares set up yet — use "Add item" first</option>}</select></label>
+    <label className="settings-field"><span>Quantity</span><input type="number" min="1" value={quantity} onChange={(event) => setQuantity(event.target.value)} /></label>
     <div className="po-receive-grid">
       <label><span>Date</span><input type="date" value={date} onChange={(event) => setDate(event.target.value)} /></label>
       <label><span>Destination</span><select value={destination} onChange={(event) => setDestination(event.target.value)}>{STOCK_LOCATIONS.map((entry) => <option key={entry}>{entry}</option>)}</select></label>
       <label><span>Reference note (optional)</span><input value={note} onChange={(event) => setNote(event.target.value)} placeholder="e.g. stock-take reference" /></label>
     </div>
-    <div className="invoice-payment-footer"><span>No purchase order needed for opening stock</span><div><button className="settings-outline" onClick={close}>Cancel</button><button className="erp-action" onClick={kind === "equipment" ? submitEquipment : submitSpares}>Add to stock</button></div></div>
+    <div className="invoice-payment-footer"><span>No purchase order needed for opening stock</span><div><button className="settings-outline" onClick={close}>Cancel</button><button className="erp-action" disabled={!spareId} onClick={submit}>Add to stock</button></div></div>
   </>;
+}
+
+/* ─── Add item / Edit item — the one place a new equipment unit or spare code is minted;
+ *  editing only ever touches master fields (name, model, category…), never holder, status
+ *  or balances, which stay the job of the stock actions above. ─── */
+function ItemFormModal({ mode, item, individuals, quantities, close, flash }: {
+  mode: "add" | "edit"; item?: StockItem; individuals: Individual[]; quantities: Quantity[]; close: () => void; flash: (message: string) => void;
+}) {
+  const equipItem = item && isIndividual(item) ? item : null;
+  const spareItem = item && !isIndividual(item) ? item : null;
+  const [kind, setKind] = useState<"equipment" | "spares">(spareItem ? "spares" : "equipment");
+
+  const [name, setName] = useState(item?.name ?? "");
+  const [model, setModel] = useState(equipItem?.model ?? "");
+  const [serial, setSerial] = useState(equipItem?.serial ?? "");
+  const [category, setCategory] = useState(item?.category ?? (kind === "equipment" ? "Instruments" : "Spares"));
+  const [calibrationDue, setCalibrationDue] = useState(equipItem?.calibrationDue ?? "");
+  const [unit, setUnit] = useState(spareItem?.unit ?? STOCK_UNITS[0]);
+  const [minimum, setMinimum] = useState(String(spareItem?.minimum ?? 10));
+  const [openingQty, setOpeningQty] = useState("0");
+  const [destination, setDestination] = useState(WAREHOUSE);
+  const generatedId = useMemo(() => nextEquipmentId(individuals), [individuals]);
+
+  const submitEquipment = () => {
+    if (!name.trim()) return;
+    if (mode === "add") {
+      const id = generatedId;
+      updateStore((current) => ({
+        individuals: [{ id, name: name.trim(), model: model.trim(), serial: serial.trim() || `INTERNAL-${id}`, category: category.trim() || "Instruments", holder: "Store" as EquipmentHolder, currentWith: destination, opStatus: "Available" as EquipmentOpStatus, calibrationDue: calibrationDue || undefined, last: prettyDate(dateIso()) }, ...current.individuals],
+        moves: [{ id: `mv-${Date.now()}`, date: dateIso(), at: `${prettyDate(dateIso())} · now`, action: "Item added", source: "New item", destination, equipmentId: id, who: APPROVER, document: "", item: name.trim() }, ...current.moves],
+      }));
+      close(); flash(`${name} added as ${id} in ${destination}.`);
+    } else if (equipItem) {
+      updateStore((current) => ({
+        individuals: current.individuals.map((row) => row.id === equipItem.id ? { ...row, name: name.trim(), model: model.trim(), serial: serial.trim(), category: category.trim() || row.category, calibrationDue: calibrationDue || undefined } : row),
+      }));
+      close(); flash(`${name} updated.`);
+    }
+  };
+  const submitSpare = () => {
+    if (!name.trim()) return;
+    if (mode === "add") {
+      const highest = Math.max(0, ...quantities.map((entry) => Number(entry.id.split("-").at(-1)) || 0));
+      const id = `SP-${String(highest + 1).padStart(3, "0")}`;
+      const qty = Number(openingQty) || 0;
+      updateStore((current) => ({
+        quantities: [{ id, name: name.trim(), category: category.trim() || "Spares", unit, minimum: Number(minimum) || 0, balances: qty > 0 ? [{ location: destination, quantity: qty }] : [] }, ...current.quantities],
+        moves: qty > 0 ? [{ id: `mv-${Date.now()}`, date: dateIso(), at: `${prettyDate(dateIso())} · now`, action: "Item added", source: "New item", destination, quantity: qty, who: APPROVER, document: "", item: name.trim() }, ...current.moves] : current.moves,
+      }));
+      close(); flash(`${name} added as ${id}${qty > 0 ? ` with an opening balance of ${qty} in ${destination}` : ""}.`);
+    } else if (spareItem) {
+      updateStore((current) => ({
+        quantities: current.quantities.map((row) => row.id === spareItem.id ? { ...row, name: name.trim(), category: category.trim() || row.category, unit, minimum: Number(minimum) || 0 } : row),
+      }));
+      close(); flash(`${name} updated.`);
+    }
+  };
+
+  return <Overlay onClose={close} label={mode === "add" ? "Add item" : "Edit item"}><section className="stock-move-modal" role="dialog" aria-modal="true" aria-labelledby="item-form-title" onClick={(event) => event.stopPropagation()}>
+    <button className="stock-modal-close" onClick={close} aria-label="Close">×</button>
+    <p>Stock catalog</p><h2 id="item-form-title">{mode === "add" ? "Add item" : `Edit ${item?.name}`}</h2>
+    {mode === "add" && <div className="stock-choice-row"><button className={kind === "equipment" ? "is-selected" : ""} onClick={() => { setKind("equipment"); setCategory("Instruments"); }}>Equipment</button><button className={kind === "spares" ? "is-selected" : ""} onClick={() => { setKind("spares"); setCategory("Spares"); }}>Spares &amp; Consumables</button></div>}
+    {kind === "equipment" ? <>
+      {mode === "add" && <p className="po-start-hint">Internal ID {generatedId} will be generated for this unit.</p>}
+      <label className="settings-field"><span>Equipment name <b className="lead-required">Required</b></span><input value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. Airborne Particle Counter" /></label>
+      <label className="settings-field"><span>Make / model</span><input value={model} onChange={(event) => setModel(event.target.value)} /></label>
+      <label className="settings-field"><span>Serial number</span><input value={serial} onChange={(event) => setSerial(event.target.value)} placeholder={mode === "add" ? "Leave blank to use the generated internal ID" : ""} /></label>
+      <label className="settings-field"><span>Category</span><input value={category} onChange={(event) => setCategory(event.target.value)} /></label>
+      <label className="settings-field"><span>Calibration due (optional)</span><input type="date" value={calibrationDue} onChange={(event) => setCalibrationDue(event.target.value)} /></label>
+      {mode === "add" && <label className="settings-field"><span>Destination</span><select value={destination} onChange={(event) => setDestination(event.target.value)}>{STOCK_LOCATIONS.map((entry) => <option key={entry}>{entry}</option>)}</select></label>}
+    </> : <>
+      <label className="settings-field"><span>Item name <b className="lead-required">Required</b></span><input value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. Zero Count Filter" /></label>
+      <label className="settings-field"><span>Category</span><input value={category} onChange={(event) => setCategory(event.target.value)} /></label>
+      <label className="settings-field"><span>Unit</span><select value={unit} onChange={(event) => setUnit(event.target.value)}>{STOCK_UNITS.map((entry) => <option key={entry}>{entry}</option>)}</select></label>
+      <label className="settings-field"><span>Minimum stock level</span><input type="number" min="0" value={minimum} onChange={(event) => setMinimum(event.target.value)} /></label>
+      {mode === "add" && <>
+        <label className="settings-field"><span>Opening quantity (optional)</span><input type="number" min="0" value={openingQty} onChange={(event) => setOpeningQty(event.target.value)} /></label>
+        <label className="settings-field"><span>Destination</span><select value={destination} onChange={(event) => setDestination(event.target.value)}>{STOCK_LOCATIONS.map((entry) => <option key={entry}>{entry}</option>)}</select></label>
+      </>}
+    </>}
+    <div className="stock-move-footer"><button className="settings-outline" onClick={close}>Cancel</button><button className="erp-action" disabled={!name.trim()} onClick={kind === "equipment" ? submitEquipment : submitSpare}>{mode === "add" ? "Add item" : "Save changes"}</button></div>
+  </section></Overlay>;
+}
+
+/* ─── Printable equipment label: internal ID + QR code, rendered with a tiny pure-JS QR
+ *  encoder so it works fully offline. ─── */
+function QrCode({ value, size = 132 }: { value: string; size?: number }) {
+  const qr = useMemo(() => { const code = qrcode(0, "M"); code.addData(value); code.make(); return code; }, [value]);
+  const count = qr.getModuleCount();
+  const cell = size / count;
+  const cells: React.ReactNode[] = [];
+  for (let row = 0; row < count; row++) {
+    for (let col = 0; col < count; col++) {
+      if (qr.isDark(row, col)) cells.push(<rect key={`${row}-${col}`} x={col * cell} y={row * cell} width={cell} height={cell} fill="#22303c" />);
+    }
+  }
+  return <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} role="img" aria-label={`QR code for ${value}`}><rect width={size} height={size} fill="#fff" />{cells}</svg>;
+}
+
+function LabelPreview({ item, close }: { item: Individual; close: () => void }) {
+  return <div className="stock-modal-backdrop quote-preview-backdrop"><section className="quote-preview stock-label-preview" role="dialog" aria-modal="true" aria-labelledby="label-preview-title" onClick={(event) => event.stopPropagation()}>
+    <button className="stock-modal-close" onClick={close} aria-label="Close">×</button>
+    <div className="quote-preview-actions"><button className="settings-outline" onClick={() => window.print()}>Print</button><button className="erp-action" onClick={close}>Done</button></div>
+    <article className="stock-label-card">
+      <header><img src={spmLogo} alt="SPM Lab Solutions" /><div><h2 id="label-preview-title">EQUIPMENT LABEL</h2><span>{COMPANY.name}</span></div></header>
+      <div className="stock-label-body">
+        <div className="stock-label-id">{item.id}</div>
+        <QrCode value={item.id} size={148} />
+      </div>
+      <dl className="invoice-facts stock-facts">
+        <div><dt>Name</dt><dd>{item.name}</dd></div>
+        <div><dt>Model</dt><dd>{item.model || "—"}</dd></div>
+        <div><dt>Serial</dt><dd>{item.serial || "—"}</dd></div>
+      </dl>
+    </article>
+  </section></div>;
+}
+
+/* ─── Delivery Challan print view. No pricing — a DC only documents what physically moved. ─── */
+function DcPreview({ dc, close }: { dc: DeliveryChallan; close: () => void }) {
+  return <div className="stock-modal-backdrop quote-preview-backdrop"><section className="quote-preview" role="dialog" aria-modal="true" aria-labelledby="dc-preview-title" onClick={(event) => event.stopPropagation()}>
+    <button className="stock-modal-close" onClick={close} aria-label="Close">×</button>
+    <div className="quote-preview-actions"><button className="settings-outline" onClick={() => window.print()}>Print / Save PDF</button><button className="erp-action" onClick={close}>Done</button></div>
+    <article>
+      <header><img src={spmLogo} alt="SPM Lab Solutions" /><div><h2 id="dc-preview-title">DELIVERY CHALLAN</h2><span>{dc.number}</span></div></header>
+      <div className="quote-preview-company">
+        <div><b>{COMPANY.name}</b><span>{COMPANY.address}</span><span>GSTIN: {COMPANY.gstin}</span></div>
+        <div><b>Delivered to</b><span>{dc.customer}</span>{dc.siteId && <span>{siteById(dc.siteId)?.name ?? ""}</span>}</div>
+      </div>
+      <p className="quote-preview-subject"><b>Date:</b> {prettyDate(dc.date)} &nbsp;·&nbsp; <b>Reason:</b> {dc.reason}{dc.reference && <>&nbsp;·&nbsp;<b>Reference:</b> {dc.reference}</>}</p>
+      <table><thead><tr><th>Description</th><th>Serial / ID</th><th className="number">Quantity</th></tr></thead><tbody>{dc.lines.map((line, index) => <tr key={index}><td>{line.description}</td><td>{line.serial || "—"}</td><td className="number">{line.quantity}</td></tr>)}</tbody></table>
+      <footer><div><b>Received in good condition by</b><span>Name, signature &amp; date</span></div><div><i>Authorised signatory</i><b>For {COMPANY.name}</b></div></footer>
+    </article>
+  </section></div>;
 }

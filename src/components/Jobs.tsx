@@ -1,6 +1,12 @@
-import { Fragment, useMemo, useState } from "react";
-import { CITIES, ENGINEER, JOB_SETTINGS, JOB_SLOTS, JOB_TYPES, SLOT_TIMES, addDaysIso, addMonths, customerMaster, customerSites, dateIso, dayDifference, engineers, istStamp, istTime, label12h, minutesToTime, nowIso, prettyDate, shortDay, siteById, stamp, timeToMinutes, weekStart } from "./erpMasters";
-import { adjustBalance, balanceAt, billingStatusOf, computeVisitStatus, dayCapacity, jobFullyResolved, openJobFor, priorityOf, skillFitFor, updateStore, useErpStore, visitWindow, visitsOn, type Job, type JobPriority, type JobResult, type JobSlot, type JobStatus, type JobType, type JobVisit, type StockMove, type VisitOutcome, type VisitRow } from "./erpStore";
+import { useMemo, useState } from "react";
+import { ATTENDANCE_SETTINGS, ENGINEER, JOB_TYPES, addDaysIso, customerSites, dateIso, dayDifference, engineers, istStamp, istTime, label12h, metersBetween, nowIso, prettyDate, siteById, stamp } from "./erpMasters";
+import spmLogo from "@/imports/SPM_Logo.png";
+import { COMPANY } from "./erpMasters";
+import { invoiceFromJob, nextNumber as nextInvoiceNumber } from "./Invoices";
+import {
+  adjustBalance, applyVisitStamp, balanceAt, billingStatusOf, blockedOn, computeVisitStatus, jobFullyResolved, masterExpired, masterNextDue, openJobFor, receiveInLabJob, returnInLabJob, updateStore, useErpStore, visitWindow, visitsOn,
+  type GeoPoint, type Job, type JobResult, type JobStatus, type JobType, type LocationCheck, type StockMove, type VisitOutcome, type VisitRow, type VisitStamp,
+} from "./erpStore";
 import { Overlay, Pagination, useTablePage } from "./ErpUi";
 import "./jobs.css";
 
@@ -8,24 +14,22 @@ const STATUS_TABS: (JobStatus | "All Jobs")[] = ["All Jobs", "Unassigned", "Sche
 const statusClass = (status: JobStatus) => `job-status job-status--${status.toLowerCase().replace(/ /g, "-")}`;
 const isLate = (job: Job) => Boolean(job.scheduledDate) && job.status !== "Completed" && job.status !== "Cancelled" && dayDifference(job.scheduledDate) < 0;
 const nextJobNumber = (jobs: Job[]) => `JOB-${Math.max(1041, ...jobs.map((job) => Number(job.number.split("-")[1]) || 0)) + 1}`;
-const hoursLabel = (minutes: number) => `${Number((minutes / 60).toFixed(1))}h`;
 const sameCity = (a?: string, b?: string) => a?.toLowerCase() === b?.toLowerCase();
 const scheduledLabel = (job: Job) => job.scheduledDate ? prettyDate(job.scheduledDate) : "Not scheduled";
-const slotForStart = (start: string): JobSlot => start < "13:00" ? "Morning" : "Afternoon";
-const fitsWindow = (segments: { start: string; end: string }[], start: string, end: string, travel = 0) => Boolean(start && end && end > start && segments.some((segment) => timeToMinutes(start) >= timeToMinutes(segment.start) && timeToMinutes(end) + travel * 60 <= timeToMinutes(segment.end)));
+const needsCertificate = (type: JobType) => type === "Calibration" || type === "Validation/Testing";
 
-function blankJob(number: string): Job {
-  return { id: number, number, type: "Calibration", customer: "", siteId: "", instrumentIds: [], stockIds: [], description: "", doneAt: "Customer site", scheduledDate: "", slot: JOB_SETTINGS.defaultSlot, hours: 2, status: "Unassigned", expectedSpares: [], usedSpares: [], results: [], travelNotes: "", photos: 0, activities: [{ title: "Job created", meta: stamp(), tone: "system" }] };
+function blankJob(number: string, overrides?: Partial<Job>): Job {
+  return { id: number, number, type: "Calibration", customer: "", siteId: "", instrumentIds: [], stockIds: [], description: "", doneAt: "Site visit", scheduledDate: "", hours: 2, status: "Unassigned", expectedSpares: [], usedSpares: [], results: [], travelNotes: "", photos: 0, activities: [{ title: "Job created", meta: stamp(), tone: "system" }], ...overrides };
 }
 
-export default function Jobs({ isEngineer = false, focusJob }: { isEngineer?: boolean; focusJob?: string }) {
+export default function Jobs({ isEngineer = false, focusJob, newJobPrefill, openInvoice }: { isEngineer?: boolean; focusJob?: string; newJobPrefill?: Partial<Job>; openInvoice?: (invoiceId: string) => void }) {
   const store = useErpStore();
-  const [section, setSection] = useState<"list" | "schedule" | "today">("list");
+  const [section, setSection] = useState<"list" | "today">("list");
   const [tab, setTab] = useState<JobStatus | "All Jobs">("All Jobs");
   const [billing, setBilling] = useState("All billing statuses");
   const [openId, setOpenId] = useState<string | null>(focusJob ?? null);
   const [assignId, setAssignId] = useState<string | null>(null);
-  const [creating, setCreating] = useState(false);
+  const [creating, setCreating] = useState(() => Boolean(newJobPrefill));
   const [toast, setToast] = useState("");
   const flash = (message: string) => { setToast(message); window.setTimeout(() => setToast(""), 4200); };
   const [query, setQuery] = useState("");
@@ -46,10 +50,17 @@ export default function Jobs({ isEngineer = false, focusJob }: { isEngineer?: bo
   const { pageRows, page, setPage } = useTablePage(rows, `${tab}|${billing}|${query}|${filterEngineer}|${filterDate}|${sort}`);
   const active = [tab !== "All Jobs" && tab, query && `Search: ${query}`, filterEngineer !== "All engineers" && filterEngineer, filterDate && prettyDate(filterDate), billing !== "All billing statuses" && billing].filter(Boolean);
   const clear = () => { setTab("All Jobs"); setQuery(""); setFilterEngineer("All engineers"); setFilterDate(""); setBilling("All billing statuses"); };
+  const todaysJobs = useMemo(() => mine.filter((job) => job.scheduledDate === dateIso()), [mine]);
+  if (isEngineer) return <section className="leads-page jobs-page">
+    <div className="leads-heading"><div><p className="erp-secondary-text">Operations / Jobs</p><h1>Today's Jobs</h1></div></div>
+    <EngineerToday jobs={todaysJobs} openJob={setOpenId} />
+    {open && <Overlay label={`${open.number} details`} onClose={() => setOpenId(null)} className="stock-modal-backdrop jobs-drawer-backdrop"><div className="jobs-detail-drawer"><JobRecord job={open} store={store} isEngineer close={() => setOpenId(null)} flash={flash} /></div></Overlay>}
+    {toast && <div className="settings-toast" role="status">✓ {toast}</div>}
+  </section>;
   return <section className="leads-page jobs-page">
     <div className="leads-heading"><div><p className="erp-secondary-text">Operations / Jobs</p><h1>Jobs</h1></div><button className="erp-action" onClick={() => setCreating(true)}>+ New Job</button></div>
-    {!isEngineer && <div className="stock-tabs jobs-view-tabs">{(["list", "schedule", "today"] as const).map((view) => <button key={view} className={section === view ? "is-active" : ""} onClick={() => setSection(view)}>{view === "list" ? "Jobs List" : view === "schedule" ? "Schedule" : "Today"}</button>)}</div>}
-    {section === "schedule" && !isEngineer ? <ScheduleBoard store={store} openJob={setOpenId} flash={flash} /> : section === "today" && !isEngineer ? <JobsToday store={store} openJob={setOpenId} /> : <>
+    <div className="stock-tabs jobs-view-tabs">{(["list", "today"] as const).map((view) => <button key={view} className={section === view ? "is-active" : ""} onClick={() => setSection(view)}>{view === "list" ? "Jobs List" : "Today"}</button>)}</div>
+    {section === "today" ? <JobsToday store={store} openJob={setOpenId} /> : <>
       <div className="stock-tabs job-tabs">{STATUS_TABS.map((status) => <button key={status} className={tab === status ? "is-active" : ""} onClick={() => setTab(status)}>{status} <span>{countFor(status)}</span></button>)}</div>
       <div className="erp-filters jobs-filters">
         <label className="jobs-search"><span>Search</span><input placeholder="Job, customer or site" value={query} onChange={(event) => setQuery(event.target.value)} /></label>
@@ -60,7 +71,7 @@ export default function Jobs({ isEngineer = false, focusJob }: { isEngineer?: bo
       {more && <div className="erp-filters jobs-extra-filters"><label><span>Billing status</span><select value={billing} onChange={(event) => setBilling(event.target.value)}>{["All billing statuses", "To invoice", "Invoiced", "Not applicable"].map((value) => <option key={value}>{value}</option>)}</select></label></div>}
       <div className="erp-filter-summary"><span>{rows.length} job{rows.length === 1 ? "" : "s"}{active.length ? ` · ${active.join(" · ")}` : ""}</span><div className="jobs-inline-actions">{active.length > 0 && <button className="erp-record-link" onClick={clear}>Clear all</button>}<label className="jobs-sort">Sort <select value={sort} onChange={(event) => setSort(event.target.value)}><option value="date">Date, earliest first</option><option value="newest">Job number, newest first</option><option value="customer">Customer A–Z</option></select></label></div></div>
       <div className="erp-table-shell"><table className="erp-data-table jobs-register leads-style-table"><colgroup><col style={{ width: "15%" }} /><col style={{ width: "23%" }} /><col style={{ width: "20%" }} /><col style={{ width: "8%" }} /><col style={{ width: "12%" }} /><col style={{ width: "13%" }} /><col style={{ width: "9%" }} /></colgroup><thead><tr><th>Job / Type</th><th>Customer & Site</th><th>Required / Scheduled</th><th>Est. duration</th><th>Engineer</th><th>Work status</th><th /></tr></thead><tbody>{pageRows.map((job) => <tr key={job.id} className="jobs-row-clickable" onClick={() => setOpenId(job.id)}>
-        <td><b>{job.number}</b><small>{job.type}</small>{priorityOf(job) !== "Normal" && <small className="job-late">{priorityOf(job)} priority</small>}</td>
+        <td><b>{job.number}</b><small>{job.type}</small></td>
         <td><b>{job.customer}</b><small>{siteById(job.siteId)?.name} · {siteById(job.siteId)?.city}</small></td>
         <td>{job.requiredDate && <small className="jobs-date">Required: {prettyDate(job.requiredDate)}</small>}<span className="jobs-date">{job.scheduledDate ? `Scheduled: ${prettyDate(job.scheduledDate)}` : "Not scheduled"}</span>{job.scheduledDate && <small className="jobs-date">{label12h(visitWindow(job).start)}–{label12h(visitWindow(job).end)}</small>}</td>
         <td>{job.hours}h</td><td>{job.engineer ?? <span className="erp-muted">Unassigned</span>}</td><td><span className={statusClass(job.status)}>{job.status}</span>{billingStatusOf(job) !== "Not applicable" && <small>Billing: {billingStatusOf(job)}</small>}</td>
@@ -68,9 +79,9 @@ export default function Jobs({ isEngineer = false, focusJob }: { isEngineer?: bo
       </tr>)}</tbody></table>{!rows.length && <div className="settings-empty"><b>No jobs match these filters</b><p>Try another customer, engineer or date.</p><button className="erp-record-link" onClick={clear}>Clear filters</button></div>}</div>
       <Pagination total={rows.length} page={page} onPage={setPage} />
     </>}
-    {open && <Overlay label={`${open.number} details`} onClose={() => setOpenId(null)} className="stock-modal-backdrop jobs-drawer-backdrop"><div className="jobs-detail-drawer"><JobRecord job={open} store={store} isEngineer={isEngineer} close={() => setOpenId(null)} flash={flash} /></div></Overlay>}
-    {assignJob && <AssignEngineer job={assignJob} store={store} close={() => setAssignId(null)} flash={flash} />}
-    {creating && <NewJob store={store} close={() => setCreating(false)} done={(job) => { setCreating(false); flash(`${job.number} created${job.engineer ? " and scheduled" : " · unassigned"}.`); }} />}
+    {open && <Overlay label={`${open.number} details`} onClose={() => setOpenId(null)} className="stock-modal-backdrop jobs-drawer-backdrop"><div className="jobs-detail-drawer"><JobRecord job={open} store={store} isEngineer={isEngineer} close={() => setOpenId(null)} flash={flash} openInvoice={openInvoice} /></div></Overlay>}
+    {assignJob && <AssignEngineer job={assignJob} close={() => setAssignId(null)} flash={flash} />}
+    {creating && <NewJob store={store} initial={newJobPrefill} close={() => setCreating(false)} done={(job) => { setCreating(false); flash(`${job.number} created${job.engineer ? " and scheduled" : " · unassigned"}.`); }} />}
     {toast && <div className="settings-toast" role="status">✓ {toast}</div>}
   </section>;
 }
@@ -82,9 +93,8 @@ function visitAttention(row: VisitRow, store: ReturnType<typeof useErpStore>) {
   if (row.visitStatus === "On site" && new Date(`${row.plannedDate}T${row.plannedEnd}:00+05:30`).getTime() < new Date(nowIso()).getTime()) issues.push("Visit running late");
   if (row.checkIn && row.checkIn.locationCheck !== "Within site area") issues.push(row.checkIn.locationCheck);
   if (row.outcome === "Follow-up required" || row.outcome === "Partially completed") issues.push(row.outcome);
-  const cap = dayCapacity(store.jobs, store.leaves, store.holidays, row.engineer, row.plannedDate);
-  if (cap.blocked) issues.push(`${cap.blocked.reason} conflict`);
-  if (cap.overlap) issues.push("Schedule overlap");
+  const blocked = blockedOn(store.leaves, store.holidays, row.engineer, row.plannedDate);
+  if (blocked) issues.push(`${blocked.reason} conflict`);
   const base = engineers.find((engineer) => engineer.name === row.engineer)?.base;
   if (base && !sameCity(base, siteById(row.siteId)?.city)) issues.push("Travel review");
   return issues;
@@ -100,7 +110,7 @@ function JobsToday({ store, openJob }: { store: ReturnType<typeof useErpStore>; 
   const [selected, setSelected] = useState<string | null>(null);
   const all = visitsOn(store.jobs, date).filter((row) => row.visitStatus !== "Cancelled");
   const awaits = (row: VisitRow) => !row.checkIn && new Date(`${row.plannedDate}T${row.plannedStart}:00+05:30`).getTime() <= new Date(nowIso()).getTime();
-  const keyOf = (row: VisitRow) => `${row.jobId}-${row.visitId ?? "primary"}-${row.engineer}`;
+  const keyOf = (row: VisitRow) => `${row.jobId}-${row.engineer}`;
   const rows = all.filter((row) => engineer === "All engineers" || row.engineer === engineer)
     .filter((row) => status === "All visit statuses" || (status === "Awaiting check-in" ? awaits(row) : status === "Work completed" ? row.outcome === "Work completed" : row.visitStatus === status))
     .filter((row) => attention === "All visits" || visitAttention(row, store).length > 0)
@@ -120,62 +130,18 @@ function JobsToday({ store, openJob }: { store: ReturnType<typeof useErpStore>; 
   </>;
 }
 
-function ScheduleBoard({ store, openJob, flash }: { store: ReturnType<typeof useErpStore>; openJob: (id: string) => void; flash: (message: string) => void }) {
-  const [viewMode, setViewMode] = useState<"day" | "week">("week");
-  const [anchor, setAnchor] = useState(dateIso());
-  const [city, setCity] = useState("All cities");
-  const [engineerFilter, setEngineerFilter] = useState("All engineers");
-  const [queueOpen, setQueueOpen] = useState(false);
-  const [dragged, setDragged] = useState<string | null>(null);
-  const [target, setTarget] = useState<{ jobId: string; engineer: string; date: string } | null>(null);
-  const [assignId, setAssignId] = useState<string | null>(null);
-  const days = viewMode === "week" ? Array.from({ length: 6 }, (_, i) => addDaysIso(weekStart(anchor), i)) : [anchor];
-  const unassigned = store.jobs.filter((job) => job.status === "Unassigned" && (city === "All cities" || siteById(job.siteId)?.city === city));
-  const visibleEngineers = engineers.filter((engineer) => engineerFilter === "All engineers" || engineer.name === engineerFilter);
-  const assignJob = store.jobs.find((job) => job.id === (target?.jobId ?? assignId));
-  return <div className="board-wrap jobs-board">
-    <div className="board-toolbar"><div className="board-week"><div className="job-view-toggle"><button className={viewMode === "day" ? "is-active" : ""} onClick={() => setViewMode("day")}>Day</button><button className={viewMode === "week" ? "is-active" : ""} onClick={() => setViewMode("week")}>Week</button></div><button className="settings-outline" aria-label="Previous date range" onClick={() => setAnchor(addDaysIso(anchor, viewMode === "week" ? -7 : -1))}>←</button><b>{viewMode === "week" ? `${shortDay(days[0])} – ${shortDay(days[5])}` : prettyDate(anchor)}</b><button className="settings-outline" aria-label="Next date range" onClick={() => setAnchor(addDaysIso(anchor, viewMode === "week" ? 7 : 1))}>→</button><button className="settings-outline" onClick={() => setAnchor(dateIso())}>Today</button></div><button className="settings-outline" aria-expanded={queueOpen} onClick={() => setQueueOpen(!queueOpen)}>{queueOpen ? "Hide" : "Show"} Unassigned Jobs ({unassigned.length})</button></div>
-    <div className="erp-filters jobs-filters"><label><span>Engineer</span><select value={engineerFilter} onChange={(event) => setEngineerFilter(event.target.value)}><option>All engineers</option>{engineers.map((engineer) => <option key={engineer.name}>{engineer.name}</option>)}</select></label><label><span>Site city</span><select value={city} onChange={(event) => setCity(event.target.value)}><option>All cities</option>{CITIES.map((value) => <option key={value}>{value}</option>)}</select></label>{(engineerFilter !== "All engineers" || city !== "All cities") && <button className="erp-record-link" onClick={() => { setEngineerFilter("All engineers"); setCity("All cities"); }}>Clear all</button>}</div>
-    <div className={`board-layout${queueOpen ? "" : " jobs-queue-collapsed"}`}>
-      {queueOpen && <aside className="board-queue"><h3>Unassigned Jobs <span>{unassigned.length}</span></h3>{unassigned.map((job) => <div key={job.id} className="board-chip is-queued" draggable onDragStart={() => setDragged(job.id)} onDragEnd={() => setDragged(null)}><button className="erp-record-link" onClick={() => openJob(job.id)}>{job.number}</button><b>{job.customer}</b><span>{siteById(job.siteId)?.name} · {siteById(job.siteId)?.city}</span><small>{job.type} · {job.hours}h{job.requiredDate ? ` · Required ${prettyDate(job.requiredDate)}` : ""}</small><button className="erp-record-link" onClick={() => setAssignId(job.id)}>Assign</button></div>)}{!unassigned.length && <p>No unassigned jobs.</p>}</aside>}
-      <div className="board-grid-wrap" tabIndex={0} aria-label="Engineer schedule, scroll for all days"><div className="board-grid" style={{ gridTemplateColumns: `150px repeat(${days.length}, minmax(195px, 1fr))` }}><div className="board-corner">Engineer</div>{days.map((day) => <div key={day} className={`board-day${day === dateIso() ? " is-today" : ""}`}>{shortDay(day)}{store.holidays.some((holiday) => holiday.date === day) && <small>Holiday</small>}</div>)}{visibleEngineers.map((engineer) => <Fragment key={engineer.name}><div className="board-engineer"><b>{engineer.name}</b><span>{engineer.base}</span></div>{days.map((day) => {
-        const cap = dayCapacity(store.jobs, store.leaves, store.holidays, engineer.name, day);
-        const visits = visitsOn(store.jobs, day).filter((row) => row.engineer === engineer.name && row.visitStatus !== "Cancelled" && (city === "All cities" || siteById(row.siteId)?.city === city));
-        const off = Boolean(cap.blocked && !cap.blocked.halfDay);
-        return <div key={day} className={`board-cell board-cell--${off ? "off" : cap.overlap ? "over" : cap.freeMinutes <= 0 ? "full" : "ok"}`} onDragOver={(event) => { if (dragged && !off) event.preventDefault(); }} onDrop={() => { if (dragged && !off) setTarget({ jobId: dragged, engineer: engineer.name, date: day }); }}>
-          <span className="board-load">{hoursLabel(cap.bookedMinutes)} booked · {hoursLabel(cap.freeMinutes)} free</span>{cap.blocked && <span className="board-off">{cap.blocked.reason}{visits.length ? " · Assignment needs review" : ""}</span>}{cap.overlap && <small className="job-late">Schedule overlap</small>}{visits.map((row) => <button key={`${row.jobId}-${row.visitId ?? "primary"}`} className={`board-chip board-chip--${row.jobType.toLowerCase().split(" ")[0]}`} onClick={() => openJob(row.jobId)}><b>{row.customer}</b><span>{siteById(row.siteId)?.name}</span><small className="board-slot">{label12h(row.plannedStart)}–{label12h(row.plannedEnd)}</small><small>{row.jobType}</small>{!sameCity(engineer.base, siteById(row.siteId)?.city) && <small className="job-late">Travel review · {siteById(row.siteId)?.city}</small>}</button>)}
-        </div>;
-      })}</Fragment>)}</div></div>
-    </div>
-    {assignJob && <AssignEngineer key={`${assignJob.id}-${target?.date ?? ""}`} job={assignJob} store={store} initialEngineer={target?.engineer} initialDate={target?.date} close={() => { setTarget(null); setAssignId(null); setDragged(null); }} flash={flash} />}
-  </div>;
-}
-
-function AssignEngineer({ job, store, close, flash, initialEngineer, initialDate }: { job: Job; store: ReturnType<typeof useErpStore>; close: () => void; flash: (message: string) => void; initialEngineer?: string; initialDate?: string }) {
-  const [date, setDate] = useState(initialDate ?? job.scheduledDate ?? "");
-  const [engineer, setEngineer] = useState(initialEngineer ?? job.engineer ?? "");
-  const [start, setStart] = useState(job.plannedStart ?? "");
-  const [end, setEnd] = useState(job.plannedEnd ?? "");
-  const [travel, setTravel] = useState(job.travelAllowanceHours ?? 0);
-  const [error, setError] = useState("");
-  const site = siteById(job.siteId);
-  const otherJobs = store.jobs.map((entry) => entry.id === job.id ? { ...entry, engineer: undefined, additionalEngineers: [] } : entry);
-  const cap = engineer && date ? dayCapacity(otherJobs, store.leaves, store.holidays, engineer, date) : undefined;
-  const base = engineers.find((entry) => entry.name === engineer)?.base;
-  const crossCity = base && !sameCity(base, site?.city);
-  const ranked = engineers.map((entry) => ({ ...entry, capacity: date ? dayCapacity(otherJobs, store.leaves, store.holidays, entry.name, date) : undefined, fit: skillFitFor(job.type, entry.skills) })).sort((a, b) => Number(Boolean(a.capacity?.blocked)) - Number(Boolean(b.capacity?.blocked)) || Number(!sameCity(a.base, site?.city)) - Number(!sameCity(b.base, site?.city)));
-  const assign = () => {
-    if (!date || !engineer || !start || !end) { setError("Choose a date, engineer, planned start and end time."); return; }
-    if (end <= start) { setError("Planned end must be after planned start."); return; }
-    if (!Number.isFinite(travel) || travel < 0) { setError("Travel allowance must be zero or a positive number."); return; }
-    if (!cap || !fitsWindow(cap.freeSegments, start, end, travel)) { setError("This booking and travel allowance must fit one available time slot. Choose a free slot below."); return; }
-    updateStore((current) => ({ jobs: current.jobs.map((entry) => entry.id !== job.id ? entry : { ...entry, engineer, scheduledDate: date, plannedStart: start, plannedEnd: end, slot: slotForStart(start), hours: (timeToMinutes(end) - timeToMinutes(start)) / 60, travelAllowanceHours: travel || undefined, status: entry.status === "In progress" ? "In progress" as const : "Scheduled" as const, activities: [{ title: `Assigned to ${engineer} for ${prettyDate(date)}, ${label12h(start)}–${label12h(end)}${crossCity ? ` · Travel review: ${base} to ${site?.city}` : ""}`, meta: stamp(), tone: "assigned" as const }, ...entry.activities] }) }));
-    close(); flash(`${job.number} scheduled with ${engineer}.${crossCity ? " Travel review required." : ""}`);
-  };
-  return <Overlay label="Assign engineer" onClose={close}><section className="stock-move-modal jobs-form-modal"><header className="jobs-form-header"><div><h2>Assign engineer</h2><p>{job.number} · {job.customer} · {site?.name}</p></div><button className="settings-outline" aria-label="Close assignment" onClick={close}>×</button></header><div className="jobs-form-body"><div className="quote-header-grid ci-form-grid"><label><span>Scheduled date</span><input type="date" value={date} onChange={(event) => { setDate(event.target.value); setError(""); }} /></label><label><span>Engineer</span><select value={engineer} onChange={(event) => { setEngineer(event.target.value); setError(""); }}><option value="">Select engineer</option>{ranked.map((entry) => <option key={entry.name} value={entry.name}>{entry.name} · {entry.base}{entry.capacity?.blocked ? ` · ${entry.capacity.blocked.reason}` : ""}</option>)}</select></label><label><span>Planned start</span><input type="time" value={start} onChange={(event) => setStart(event.target.value)} /></label><label><span>Planned end</span><input type="time" value={end} onChange={(event) => setEnd(event.target.value)} /></label><label><span>Travel allowance (hours)</span><input type="number" min="0" step="0.5" value={travel} onChange={(event) => setTravel(Number(event.target.value))} /></label></div>
-      {cap && <section className="erp-form-section jobs-free-slots"><h3>Available time slots</h3><p>{hoursLabel(cap.bookedMinutes)} booked · {hoursLabel(cap.freeMinutes)} free</p>{cap.blocked && <p className="job-late">{cap.blocked.reason}</p>}{cap.freeSegments.length ? cap.freeSegments.map((segment) => <button className="settings-outline" key={segment.start} onClick={() => { setStart(segment.start); setEnd(minutesToTime(Math.min(timeToMinutes(segment.end) - travel * 60, timeToMinutes(segment.start) + job.hours * 60))); setError(""); }}>{label12h(segment.start)}–{label12h(segment.end)}</button>) : <p>No available slots. Choose another engineer or date.</p>}<small>Choose a slot to fill the planned times. Travel allowance reserves time after the visit.</small></section>}
-      {crossCity && <p className="master-warning"><b>Travel review required</b><span>{engineer} is based in {base}; the site is in {site?.city}. Confirm travel arrangements and reserve suitable travel time.</span></p>}{engineer && skillFitFor(job.type, engineers.find((entry) => entry.name === engineer)?.skills ?? []) === "gap" && <p className="master-warning">Engineer skills need review for {job.type.toLowerCase()}.</p>}{job.checkIn && <p className="erp-muted">Recorded check-in will be preserved.</p>}{error && <p className="jobs-form-error" role="alert">{error}</p>}
-    </div><footer className="jobs-form-footer"><button className="settings-outline" onClick={close}>Cancel</button><button className="erp-action" onClick={assign}>Confirm assignment</button></footer></section></Overlay>;
+function EngineerToday({ jobs, openJob }: { jobs: Job[]; openJob: (id: string) => void }) {
+  const rows = [...jobs].sort((a, b) => (a.plannedStart ?? "").localeCompare(b.plannedStart ?? ""));
+  return <>
+    <div className="erp-filter-summary"><span>{rows.length} job{rows.length === 1 ? "" : "s"} scheduled today</span></div>
+    <div className="erp-table-shell"><table className="erp-data-table jobs-register leads-style-table"><colgroup><col style={{ width: "18%" }} /><col style={{ width: "32%" }} /><col style={{ width: "20%" }} /><col style={{ width: "15%" }} /><col style={{ width: "15%" }} /></colgroup><thead><tr><th>Job / Type</th><th>Customer & Site</th><th>Planned time</th><th>Work status</th><th /></tr></thead><tbody>{rows.map((job) => <tr key={job.id} className="jobs-row-clickable" onClick={() => openJob(job.id)}>
+      <td><b>{job.number}</b><small>{job.type}</small></td>
+      <td><b>{job.customer}</b><small>{siteById(job.siteId)?.name} · {siteById(job.siteId)?.city}</small></td>
+      <td>{job.plannedStart ? <span className="jobs-date">{label12h(visitWindow(job).start)}–{label12h(visitWindow(job).end)}</span> : <span className="erp-muted">Time not set</span>}</td>
+      <td><span className={statusClass(job.status)}>{job.status}</span></td>
+      <td><button className="erp-record-link" onClick={(event) => { event.stopPropagation(); openJob(job.id); }}>Open</button></td>
+    </tr>)}</tbody></table>{!rows.length && <div className="settings-empty"><b>No jobs scheduled for today</b><p>Check back once you're assigned a job.</p></div>}</div>
+  </>;
 }
 
 /* ─── Reason prompt (hold / cancel) ──────────────────────────────── */
@@ -189,76 +155,74 @@ function ReasonPrompt({ title, submitLabel, close, submit }: { title: string; su
   </section></div>;
 }
 
-/* ─── Add engineer / Add visit ───────────────────────────────────── */
-function AddVisitForm({ job, close }: { job: Job; close: () => void }) {
-  const [engineer, setEngineer] = useState(job.engineer ?? engineers[0].name);
-  const [plannedDate, setPlannedDate] = useState(job.scheduledDate);
-  const [slot, setSlot] = useState<JobSlot>(job.slot);
-  const submit = () => {
-    const window = SLOT_TIMES[slot];
-    const visit: JobVisit = { id: `visit-${Date.now()}`, engineer, plannedDate, plannedStart: window.start, plannedEnd: window.end };
-    updateStore((current) => ({ jobs: current.jobs.map((entry) => entry.id !== job.id ? entry : { ...entry, additionalVisits: [...(entry.additionalVisits ?? []), visit], activities: [{ title: `Added a visit for ${engineer} on ${prettyDate(plannedDate)}`, meta: stamp(), tone: "assigned" as const }, ...entry.activities] }) }));
-    close();
+/* ─── Assign engineer — the one simple form: engineer, date, time ──── */
+function AssignEngineer({ job, close, flash }: { job: Job; close: () => void; flash: (message: string) => void }) {
+  const [date, setDate] = useState(job.scheduledDate || dateIso());
+  const [engineer, setEngineer] = useState(job.engineer ?? "");
+  const [time, setTime] = useState(job.plannedStart ?? "09:30");
+  const [error, setError] = useState("");
+  const assign = () => {
+    if (!date || !engineer || !time) { setError("Choose a date, engineer and time."); return; }
+    updateStore((current) => ({ jobs: current.jobs.map((entry) => entry.id !== job.id ? entry : { ...entry, engineer, scheduledDate: date, plannedStart: time, status: entry.status === "In progress" ? "In progress" as const : "Scheduled" as const, activities: [{ title: `Assigned to ${engineer} for ${prettyDate(date)}, ${label12h(time)}`, meta: stamp(), tone: "assigned" as const }, ...entry.activities] }) }));
+    close(); flash(`${job.number} scheduled with ${engineer}.`);
   };
-  return <div className="stock-modal-backdrop" onClick={close}><section className="stock-move-modal" role="dialog" aria-modal="true" aria-labelledby="add-visit-title" onClick={(event) => event.stopPropagation()}>
-    <button className="stock-modal-close" onClick={close} aria-label="Close">×</button>
-    <h2 id="add-visit-title">Add a visit</h2>
+  return <Overlay label="Assign engineer" onClose={close}><section className="stock-move-modal jobs-form-modal"><header className="jobs-form-header"><div><h2>Assign engineer</h2><p>{job.number} · {job.customer} · {siteById(job.siteId)?.name}</p></div><button className="settings-outline" aria-label="Close assignment" onClick={close}>×</button></header><div className="jobs-form-body">
     <div className="quote-header-grid ci-form-grid">
-      <label><span>Engineer</span><select value={engineer} onChange={(event) => setEngineer(event.target.value)}>{engineers.map((entry) => <option key={entry.name}>{entry.name}</option>)}</select></label>
-      <label><span>Date</span><input type="date" value={plannedDate} onChange={(event) => setPlannedDate(event.target.value)} /></label>
-      <label><span>Slot</span><select value={slot} onChange={(event) => setSlot(event.target.value as JobSlot)}>{JOB_SLOTS.map((entry) => <option key={entry}>{entry}</option>)}</select></label>
+      <label><span>Engineer</span><select value={engineer} onChange={(event) => { setEngineer(event.target.value); setError(""); }}><option value="">Select engineer</option>{engineers.map((entry) => <option key={entry.name} value={entry.name}>{entry.name} · {entry.base}</option>)}</select></label>
+      <label><span>Date</span><input type="date" value={date} onChange={(event) => { setDate(event.target.value); setError(""); }} /></label>
+      <label><span>Time</span><input type="time" value={time} onChange={(event) => { setTime(event.target.value); setError(""); }} /></label>
     </div>
-    <div className="invoice-payment-footer"><span /><div><button className="settings-outline" onClick={close}>Cancel</button><button className="erp-action" onClick={submit}>Add visit</button></div></div>
-  </section></div>;
+    {job.checkIn && <p className="erp-muted">Recorded check-in will be preserved.</p>}
+    {error && <p className="jobs-form-error" role="alert">{error}</p>}
+  </div><footer className="jobs-form-footer"><button className="settings-outline" onClick={close}>Cancel</button><button className="erp-action" onClick={assign}>Confirm assignment</button></footer></section></Overlay>;
 }
 
-function AddEngineerForm({ job, close }: { job: Job; close: () => void }) {
-  const options = engineers.filter((entry) => entry.name !== job.engineer && !(job.additionalEngineers ?? []).includes(entry.name));
-  const [name, setName] = useState(options[0]?.name ?? "");
+/* ─── Receive an in-lab instrument, with its condition on arrival ──── */
+function ReceiveInstrumentForm({ job, close, flash }: { job: Job; close: () => void; flash: (message: string) => void }) {
+  const [condition, setCondition] = useState("Good — no visible damage");
+  const [date, setDate] = useState(dateIso());
   const submit = () => {
-    updateStore((current) => ({ jobs: current.jobs.map((entry) => entry.id !== job.id ? entry : { ...entry, additionalEngineers: [...(entry.additionalEngineers ?? []), name], activities: [{ title: `Added ${name} to this visit`, meta: stamp(), tone: "assigned" as const }, ...entry.activities] }) }));
-    close();
+    if (!condition.trim()) return;
+    updateStore((current) => receiveInLabJob(current, job.id, condition.trim(), date));
+    close(); flash(`Instrument received — condition: ${condition.trim()}.`);
   };
-  return <div className="stock-modal-backdrop" onClick={close}><section className="stock-move-modal" role="dialog" aria-modal="true" aria-labelledby="add-engineer-title" onClick={(event) => event.stopPropagation()}>
+  return <div className="stock-modal-backdrop" onClick={close}><section className="stock-move-modal" role="dialog" aria-modal="true" aria-labelledby="receive-instrument-title" onClick={(event) => event.stopPropagation()}>
     <button className="stock-modal-close" onClick={close} aria-label="Close">×</button>
-    <h2 id="add-engineer-title">Add engineer</h2>
-    {options.length ? <><label className="settings-field"><span>Engineer</span><select value={name} onChange={(event) => setName(event.target.value)}>{options.map((entry) => <option key={entry.name}>{entry.name}</option>)}</select></label>
-      <div className="invoice-payment-footer"><span /><div><button className="settings-outline" onClick={close}>Cancel</button><button className="erp-action" onClick={submit}>Add</button></div></div></> : <p className="po-start-hint">Everyone is already on this visit.</p>}
+    <h2 id="receive-instrument-title">Receive instrument</h2>
+    <p className="po-start-hint">{job.customer} · {job.number}</p>
+    <label className="settings-field"><span>Condition on receipt <b className="lead-required">Required</b></span><input value={condition} onChange={(event) => setCondition(event.target.value)} placeholder="e.g. Good — no visible damage" /></label>
+    <label className="settings-field"><span>Date received</span><input type="date" value={date} onChange={(event) => setDate(event.target.value)} /></label>
+    <div className="invoice-payment-footer"><span /><div><button className="settings-outline" onClick={close}>Cancel</button><button className="erp-action" disabled={!condition.trim()} onClick={submit}>Receive</button></div></div>
   </section></div>;
-}
-
-function VisitRowView({ label, engineer, plannedDate, window, checkIn, checkOut, outcome, cancelled }: { label: string; engineer?: string; plannedDate: string; window: { start: string; end: string }; checkIn?: Job["checkIn"]; checkOut?: Job["checkOut"]; outcome?: VisitOutcome; cancelled: boolean }) {
-  const status = computeVisitStatus({ plannedDate, plannedStart: window.start, checkIn, checkOut, cancelled }, nowIso());
-  return <div>
-    <b>{label} · {engineer ?? "Nobody assigned"}</b>
-    <span>{plannedDate ? `${prettyDate(plannedDate)} · ${label12h(window.start)}–${label12h(window.end)} · ${status}` : "Not scheduled"}</span>
-    <small>Check-in {checkIn ? istStamp(checkIn.at) : "—"}{checkIn?.locationCheck ? ` · ${checkIn.locationCheck}` : ""} · Check-out {checkOut ? istStamp(checkOut.at) : "—"}{outcome ? ` · ${outcome}` : ""}</small>
-  </div>;
 }
 
 /* ─── Job record ─────────────────────────────────────────────────── */
-function JobRecord({ job, store, isEngineer, close, flash }: { job: Job; store: ReturnType<typeof useErpStore>; isEngineer: boolean; close: () => void; flash: (message: string) => void }) {
+function JobRecord({ job, store, isEngineer, close, flash, openInvoice }: { job: Job; store: ReturnType<typeof useErpStore>; isEngineer: boolean; close: () => void; flash: (message: string) => void; openInvoice?: (invoiceId: string) => void }) {
   const [assigning, setAssigning] = useState(false);
   const [completing, setCompleting] = useState(false);
   const [holding, setHolding] = useState(false);
   const [cancelling, setCancelling] = useState(false);
-  const [addingVisit, setAddingVisit] = useState(false);
-  const [addingEngineer, setAddingEngineer] = useState(false);
+  const [receiving, setReceiving] = useState(false);
   const site = siteById(job.siteId);
   const instruments = store.instruments.filter((item) => job.instrumentIds.includes(item.id));
   const stock = store.individuals.filter((item) => job.stockIds.includes(item.id));
   const billing = billingStatusOf(job);
+  const isInLab = job.doneAt === "In-lab";
+  const isSiteVisit = job.doneAt === "Site visit";
 
   const start = () => {
-    updateStore((current) => ({ jobs: current.jobs.map((entry) => entry.id !== job.id ? entry : { ...entry, status: "In progress" as const, startedAt: dateIso(), activities: [{ title: "Started on site", meta: stamp(), tone: "system" as const }, ...entry.activities] }) }));
+    updateStore((current) => ({ jobs: current.jobs.map((entry) => entry.id !== job.id ? entry : { ...entry, status: "In progress" as const, startedAt: dateIso(), activities: [{ title: "Started", meta: stamp(), tone: "system" as const }, ...entry.activities] }) }));
     flash("Job started. Fill in each instrument as you go.");
   };
   const createInvoice = () => {
-    updateStore((current) => {
-      const number = `INV-2026-${String(Math.max(118, ...current.invoices.map((inv) => Number(inv.number.split("-").at(-1)) || 0)) + 1).padStart(4, "0")}`;
-      return { jobs: current.jobs.map((entry) => entry.id !== job.id ? entry : { ...entry, invoiceNumber: number, activities: [{ title: `Invoice ${number} created`, meta: stamp(), tone: "system" as const }, ...entry.activities] }) };
-    });
-    flash("Invoice draft created with the service lines and spares used. Open it in Invoices to send.");
+    const customer = store.customers.find((entry) => entry.name === job.customer);
+    const invoice = invoiceFromJob(job, store.instruments, store.customers, nextInvoiceNumber(store.invoices));
+    updateStore((current) => ({
+      invoices: [invoice, ...current.invoices],
+      jobs: current.jobs.map((entry) => entry.id !== job.id ? entry : { ...entry, invoiceNumber: invoice.number, activities: [{ title: `Invoice ${invoice.number} created`, meta: stamp(), tone: "system" as const }, ...entry.activities] }),
+    }));
+    flash(customer ? `Invoice ${invoice.number} created. Open it in Invoices to price and send.` : `Invoice ${invoice.number} created — ${job.customer} has no customer record yet, so GSTIN and address need filling in.`);
+    close(); openInvoice?.(invoice.id);
   };
   const putOnHold = (reason: string) => {
     updateStore((current) => ({ jobs: current.jobs.map((entry) => entry.id !== job.id ? entry : { ...entry, status: "On hold" as const, onHoldReason: reason, activities: [{ title: `Put on hold — ${reason}`, meta: stamp(), tone: "system" as const }, ...entry.activities] }) }));
@@ -273,6 +237,29 @@ function JobRecord({ job, store, isEngineer, close, flash }: { job: Job; store: 
     updateStore((current) => ({ jobs: current.jobs.map((entry) => entry.id !== job.id ? entry : { ...entry, status: "Cancelled" as const, cancelReason: reason, activities: [{ title: `Cancelled — ${reason}`, meta: stamp(), tone: "system" as const }, ...entry.activities] }) }));
     setCancelling(false); flash("Job cancelled."); close();
   };
+  const returnWithDc = () => {
+    let result: ReturnType<typeof returnInLabJob> = {};
+    updateStore((current) => { result = returnInLabJob(current, job.id, dateIso()); return result; });
+    flash(result.deliveryChallans ? `Returned to ${job.customer}. ${result.deliveryChallans[0].number} created.` : "Nothing to return — this job has no instruments on it.");
+  };
+  const gpsAction = (kind: "checkIn" | "checkOut") => {
+    const write = (value: VisitStamp) => { updateStore((current) => applyVisitStamp(current, job.id, kind, value)); flash(`${kind === "checkIn" ? "Checked in" : "Checked out"} · ${value.locationCheck}.`); };
+    if (!navigator.geolocation) { const now = nowIso(); write({ at: now, syncedAt: now, source: "Mobile", locationCheck: "Location unavailable" }); return; }
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        const location: GeoPoint = { lat: position.coords.latitude, lng: position.coords.longitude, accuracyM: Math.round(position.coords.accuracy) };
+        const now = nowIso();
+        let locationCheck: LocationCheck = "Location unavailable"; let siteDistanceM: number | undefined;
+        if (site?.lat !== undefined && site?.lng !== undefined) {
+          siteDistanceM = Math.round(metersBetween(location, { lat: site.lat, lng: site.lng }));
+          locationCheck = siteDistanceM <= ATTENDANCE_SETTINGS.siteRadiusMetersDemo ? "Within site area" : "Outside site area";
+        }
+        write({ at: now, syncedAt: now, source: "Mobile", location, siteDistanceM, locationCheck });
+      },
+      () => { const now = nowIso(); write({ at: now, syncedAt: now, source: "Mobile", locationCheck: "Location unavailable" }); },
+      { enableHighAccuracy: true, timeout: 10000 },
+    );
+  };
 
   return <section className="quote-editor-page invoice-editor-page job-record-page">
     <header className="quote-editor-head"><div>
@@ -283,18 +270,22 @@ function JobRecord({ job, store, isEngineer, close, flash }: { job: Job; store: 
       {billing !== "Not applicable" && <span className={billing === "To invoice" ? "due-nojob" : "due-job-chip"}>{billing}</span>}
       {isLate(job) && <span className="invoice-due-chip is-late">Overdue · {Math.abs(dayDifference(job.scheduledDate))}d</span>}
     </div><div className="quote-editor-actions">
-      {job.status === "Unassigned" && <button className="erp-action" onClick={() => setAssigning(true)}>Assign engineer</button>}
+      {job.status === "Unassigned" && !isEngineer && <button className="erp-action" onClick={() => setAssigning(true)}>Assign engineer</button>}
       {job.status === "Scheduled" && <><button className="erp-action" onClick={start}>Start job</button>{!isEngineer && <button className="settings-outline" onClick={() => setAssigning(true)}>Reassign</button>}{!isEngineer && <button className="settings-outline" onClick={() => setHolding(true)}>Put on hold</button>}</>}
       {job.status === "In progress" && <><button className="erp-action" onClick={() => setCompleting(true)}>Log visit outcome</button>{!isEngineer && <button className="settings-outline" onClick={() => setHolding(true)}>Put on hold</button>}</>}
       {job.status === "On hold" && <button className="erp-action" onClick={resume}>Resume</button>}
       {job.status === "Completed" && billing === "To invoice" && !isEngineer && <button className="erp-action" onClick={createInvoice}>Create invoice</button>}
-      {job.status === "Completed" && billing === "Invoiced" && <button className="settings-outline" onClick={() => flash(`${job.invoiceNumber} opened in Invoices`)}>Open {job.invoiceNumber}</button>}
+      {job.status === "Completed" && billing === "Invoiced" && !isEngineer && <button className="settings-outline" onClick={() => { close(); openInvoice?.(store.invoices.find((invoice) => invoice.number === job.invoiceNumber)?.id ?? ""); }}>Open {job.invoiceNumber}</button>}
+      {isInLab && !job.receivedAt && <button className="settings-outline" onClick={() => setReceiving(true)}>Receive instrument</button>}
+      {isInLab && job.receivedAt && !job.returnedAt && <button className="settings-outline" onClick={returnWithDc}>Return with DC</button>}
+      {isSiteVisit && isEngineer && (job.status === "Scheduled" || job.status === "In progress") && !job.checkIn && <button className="settings-outline" onClick={() => gpsAction("checkIn")}>Check in</button>}
+      {isSiteVisit && isEngineer && (job.status === "Scheduled" || job.status === "In progress") && job.checkIn && !job.checkOut && <button className="settings-outline" onClick={() => gpsAction("checkOut")}>Check out</button>}
       {!isEngineer && job.status !== "Completed" && job.status !== "Cancelled" && <button className="settings-outline" onClick={() => setCancelling(true)}>Cancel job</button>}
     </div></header>
 
     <main className="invoice-editor-layout">
       <section className="quote-document-section invoice-block">
-        <div className="quote-section-title"><div><h2>Work Details</h2><span>{job.type}</span></div></div>
+        <div className="quote-section-title"><div><h2>Work Details</h2><span>{job.type} · {job.doneAt}</span></div></div>
         <p className="job-description">{job.description || "No description."}</p>
         <div className="job-instrument-list">{instruments.map((item) => <div key={item.id}><b>{item.name}</b><span>{item.make} {item.model} · {item.serial}</span><small>{item.intervalMonths ? `Every ${item.intervalMonths} months` : "Calibration interval unknown"}</small></div>)}
           {stock.map((item) => <div key={item.id}><b>{item.name}</b><span>Our equipment · {item.id}</span><small>{item.opStatus}</small></div>)}
@@ -302,29 +293,39 @@ function JobRecord({ job, store, isEngineer, close, flash }: { job: Job; store: 
         </div>
       </section>
 
+      {isInLab && <section className="quote-document-section invoice-block">
+        <div className="quote-section-title"><div><h2>In-lab custody</h2><span>Receive, work on it, then return it with a Delivery Challan.</span></div></div>
+        <dl className="invoice-facts due-facts">
+          <div><dt>Received</dt><dd>{job.receivedAt ? `${prettyDate(job.receivedAt)} · ${job.receivedCondition}` : "Not yet received"}</dd></div>
+          <div><dt>Returned</dt><dd>{job.returnedAt ? `${prettyDate(job.returnedAt)} · ${job.returnDc}` : "Not yet returned"}</dd></div>
+        </dl>
+      </section>}
+
       <section className="quote-document-section invoice-block">
-        <div className="quote-section-title"><div><h2>Customer & Site</h2><span>{job.doneAt === "Our lab" ? "At SPM" : job.doneAt}</span></div></div>
+        <div className="quote-section-title"><div><h2>Customer & Site</h2><span>{isInLab ? "At SPM" : "Site visit"}</span></div></div>
         <dl className="invoice-facts due-facts">
           <div><dt>Customer</dt><dd>{job.customer}</dd></div>
-          <div><dt>Site</dt><dd>{site?.name}</dd></div>
-          <div className="invoice-fact-wide"><dt>Address</dt><dd>{site?.address}, {site?.city}</dd></div>
-          <div><dt>Contact</dt><dd>{site?.contact}</dd></div>
-          <div><dt>Phone</dt><dd><a className="job-call" href={`tel:${site?.phone.replace(/\s/g, "")}`}>{site?.phone}</a></dd></div>
+          <div><dt>Site</dt><dd>{site?.name ?? "—"}</dd></div>
+          <div className="invoice-fact-wide"><dt>Address</dt><dd>{site ? `${site.address}, ${site.city}` : "—"}</dd></div>
+          <div><dt>Contact</dt><dd>{site?.contact ?? "—"}</dd></div>
+          <div><dt>Phone</dt><dd>{site?.phone ? <a className="job-call" href={`tel:${site.phone.replace(/\s/g, "")}`}>{site.phone}</a> : "—"}</dd></div>
         </dl>
       </section>
 
       <section className="quote-document-section invoice-block">
-        <div className="quote-section-title"><div><h2>Visits</h2><span>{(job.scheduledDate && job.engineer ? 1 : 0) + (job.additionalVisits?.length ?? 0)} planned</span></div>{!isEngineer && job.status !== "Cancelled" && <div className="quote-editor-actions"><button className="settings-outline" onClick={() => setAddingEngineer(true)}>+ Add engineer</button><button className="settings-outline" onClick={() => setAddingVisit(true)}>+ Add visit</button></div>}</div>
+        <div className="quote-section-title"><div><h2>Visit</h2><span>{job.scheduledDate && job.engineer ? "1 planned" : "Not scheduled"}</span></div></div>
         <div className="job-instrument-list">
-          <VisitRowView label="Primary" engineer={job.engineer} plannedDate={job.scheduledDate} window={visitWindow(job)} checkIn={job.checkIn} checkOut={job.checkOut} outcome={job.outcome} cancelled={job.status === "Cancelled"} />
-          {(job.additionalVisits ?? []).map((visit) => <VisitRowView key={visit.id} label="Additional" engineer={visit.engineer} plannedDate={visit.plannedDate} window={{ start: visit.plannedStart, end: visit.plannedEnd }} checkIn={visit.checkIn} checkOut={visit.checkOut} outcome={visit.outcome} cancelled={Boolean(visit.cancelled)} />)}
+          <div>
+            <b>{job.engineer ?? "Nobody assigned"}</b>
+            <span>{job.scheduledDate ? `${prettyDate(job.scheduledDate)} · ${label12h(visitWindow(job).start)}–${label12h(visitWindow(job).end)} · ${computeVisitStatus({ plannedDate: job.scheduledDate, plannedStart: visitWindow(job).start, checkIn: job.checkIn, checkOut: job.checkOut, cancelled: job.status === "Cancelled" }, nowIso())}` : "Not scheduled"}</span>
+            <small>Check-in {job.checkIn ? istStamp(job.checkIn.at) : "—"}{job.checkIn?.locationCheck ? ` · ${job.checkIn.locationCheck}` : ""} · Check-out {job.checkOut ? istStamp(job.checkOut.at) : "—"}{job.outcome ? ` · ${job.outcome}` : ""}</small>
+          </div>
         </div>
-        {(job.additionalEngineers ?? []).length > 0 && <p className="po-start-hint">Also on this visit: {job.additionalEngineers!.join(", ")}</p>}
         {job.remainingWork && <p className="po-start-hint">Remaining work: {job.remainingWork}</p>}
       </section>
 
       <section className="quote-document-section invoice-block">
-        <div className="quote-section-title"><div><h2>When and who</h2><span>{job.hours} hours estimated{job.travelAllowanceHours ? ` · ${job.travelAllowanceHours}h travel allowance` : ""}</span></div></div>
+        <div className="quote-section-title"><div><h2>When and who</h2><span>{job.hours} hours estimated</span></div></div>
         <dl className="invoice-facts due-facts">
           <div><dt>Required</dt><dd>{job.requiredDate ? prettyDate(job.requiredDate) : "Not specified"}</dd></div><div><dt>Scheduled</dt><dd>{scheduledLabel(job)}</dd></div>
           <div><dt>Planned time</dt><dd>{job.scheduledDate ? `${label12h(visitWindow(job).start)}–${label12h(visitWindow(job).end)}` : "Not scheduled"}</dd></div>
@@ -347,30 +348,57 @@ function JobRecord({ job, store, isEngineer, close, flash }: { job: Job; store: 
           <dl><div><dt>As found</dt><dd>{result.asFound}</dd></div><div><dt>As left</dt><dd>{result.asLeft}</dd></div></dl>
           {result.readings && <p className="job-readings">{result.readings}</p>}
           {result.remarks && <p className="job-remarks">{result.remarks}</p>}
-          {result.certificate && <button className="ci-cert">{result.certificate}</button>}
         </div>; })}</div>
         {job.travelNotes && <p className="job-travel">Travel: {job.travelNotes}</p>}
         {job.signature && <p className="job-signed">Signed by the customer · {job.photos} photo{job.photos === 1 ? "" : "s"} attached</p>}
+      </section>}
+
+      {(job.certificateNumber || (job.mastersUsed?.length ?? 0) > 0) && <section className="quote-document-section invoice-block">
+        <div className="quote-section-title"><div><h2>Certificate</h2><span>Closes out a calibration or validation job.</span></div></div>
+        <dl className="invoice-facts due-facts">
+          <div><dt>Certificate</dt><dd>{job.certificateNumber ?? "Not recorded"}{job.certificateGeneratedAt ? ` · ${prettyDate(job.certificateGeneratedAt)}` : ""}</dd></div>
+          <div><dt>File</dt><dd>{job.certificateFile || "Generated by SPM"}</dd></div>
+          <div className="invoice-fact-wide"><dt>Reference standards used</dt><dd>{job.mastersUsed?.length ? store.masters.filter((master) => job.mastersUsed!.includes(master.id)).map((master) => master.name).join(", ") : "None recorded"}</dd></div>
+        </dl>
       </section>}
 
       <section className="quote-document-section invoice-block">
         <div className="quote-section-title"><div><h2>History</h2><span>What has happened to this job.</span></div></div>
         <div className="lead-timeline quote-activity">{job.activities.map((activity, index) => <div key={index} className={activity.tone ? `job-timeline--${activity.tone}` : ""}><i /><p><b>{activity.title}</b><span>{activity.meta}</span></p></div>)}</div>
       </section>
-
-
     </main>
 
-    {job.status === "In progress" && <div className="invoice-mobile-bar"><button className="erp-action" onClick={() => setCompleting(true)}>Log visit outcome</button><a className="settings-outline" href={`tel:${site?.phone.replace(/\s/g, "")}`}>Call site</a></div>}
-    {job.status === "Scheduled" && <div className="invoice-mobile-bar"><button className="erp-action" onClick={start}>Start job</button><a className="settings-outline" href={`tel:${site?.phone.replace(/\s/g, "")}`}>Call site</a></div>}
+    {job.status === "In progress" && <div className="invoice-mobile-bar"><button className="erp-action" onClick={() => setCompleting(true)}>Log visit outcome</button>{site?.phone && <a className="settings-outline" href={`tel:${site.phone.replace(/\s/g, "")}`}>Call site</a>}</div>}
+    {job.status === "Scheduled" && <div className="invoice-mobile-bar"><button className="erp-action" onClick={start}>Start job</button>{site?.phone && <a className="settings-outline" href={`tel:${site.phone.replace(/\s/g, "")}`}>Call site</a>}</div>}
 
-    {assigning && <AssignEngineer job={job} store={store} close={() => setAssigning(false)} flash={flash} />}
+    {assigning && <AssignEngineer job={job} close={() => setAssigning(false)} flash={flash} />}
     {completing && <CompleteVisit job={job} store={store} close={() => setCompleting(false)} flash={flash} />}
     {holding && <ReasonPrompt title="Put this job on hold" submitLabel="Put on hold" close={() => setHolding(false)} submit={putOnHold} />}
     {cancelling && <ReasonPrompt title="Cancel this job" submitLabel="Cancel job" close={() => setCancelling(false)} submit={cancelJob} />}
-    {addingVisit && <AddVisitForm job={job} close={() => setAddingVisit(false)} />}
-    {addingEngineer && <AddEngineerForm job={job} close={() => setAddingEngineer(false)} />}
+    {receiving && <ReceiveInstrumentForm job={job} close={() => setReceiving(false)} flash={flash} />}
   </section>;
+}
+
+/* ─── Certificate print view ─────────────────────────────────────── */
+function CertificatePreview({ job, store, mastersUsed, results, certNumber, close }: { job: Job; store: ReturnType<typeof useErpStore>; mastersUsed: string[]; results: JobResult[]; certNumber: string; close: () => void }) {
+  const instruments = store.instruments.filter((item) => job.instrumentIds.includes(item.id));
+  const masters = store.masters.filter((master) => mastersUsed.includes(master.id));
+  const site = siteById(job.siteId);
+  return <div className="stock-modal-backdrop quote-preview-backdrop"><section className="quote-preview" role="dialog" aria-modal="true" aria-labelledby="cert-preview-title" onClick={(event) => event.stopPropagation()}>
+    <button className="stock-modal-close" onClick={close} aria-label="Close">×</button>
+    <div className="quote-preview-actions"><button className="settings-outline" onClick={() => window.print()}>Print / Save PDF</button><button className="erp-action" onClick={close}>Done</button></div>
+    <article>
+      <header><img src={spmLogo} alt="SPM Lab Solutions" /><div><h2 id="cert-preview-title">CALIBRATION CERTIFICATE</h2><span>{certNumber}</span></div></header>
+      <div className="quote-preview-company">
+        <div><b>{COMPANY.name}</b><span>{COMPANY.address}</span><span>GSTIN: {COMPANY.gstin}</span></div>
+        <div><b>Issued to</b><span>{job.customer}</span><span>{site ? `${site.name}, ${site.city}` : ""}</span></div>
+      </div>
+      <p className="quote-preview-subject"><b>Job:</b> {job.number} · {job.type} · <b>Date:</b> {prettyDate(dateIso())}</p>
+      <table><thead><tr><th>Instrument</th><th>As found</th><th>As left</th><th>Result</th></tr></thead><tbody>{instruments.map((item) => { const result = results.find((entry) => entry.instrumentId === item.id); return <tr key={item.id}><td>{item.name} · {item.serial}</td><td>{result?.asFound || "—"}</td><td>{result?.asLeft || "—"}</td><td>{result?.outcome ?? "—"}</td></tr>; })}</tbody></table>
+      <section><b>Reference standards used</b><p>{masters.length ? masters.map((master) => `${master.name} (${master.serial})`).join(", ") : "None recorded"}</p></section>
+      <footer><div><b>Calibrated by</b><span>{job.engineer ?? ENGINEER}</span></div><div><i>Authorised signatory</i><b>For {COMPANY.name}</b></div></footer>
+    </article>
+  </section></div>;
 }
 
 /* ─── Visit outcome (engineer completion), mobile first ──────────── */
@@ -384,12 +412,14 @@ function CompleteVisit({ job, store, close, flash }: { job: Job; store: ReturnTy
   const [outcome, setOutcome] = useState<VisitOutcome | "">("");
   const [outcomeNote, setOutcomeNote] = useState("");
   const [remainingWork, setRemainingWork] = useState("");
-  const [scheduleFollowUp, setScheduleFollowUp] = useState(false);
-  const [followUpDate, setFollowUpDate] = useState(addDaysIso(job.scheduledDate, 2));
-  const isCalibration = job.type === "Calibration";
+  const [mastersUsed, setMastersUsed] = useState<string[]>(job.mastersUsed ?? []);
+  const [certNumber, setCertNumber] = useState(job.certificateNumber ?? "");
+  const [certFile, setCertFile] = useState(job.certificateFile ?? "");
+  const [certPreview, setCertPreview] = useState(false);
+  const needsCert = needsCertificate(job.type);
+  const engineerName = job.engineer ?? ENGINEER;
 
   const total = instruments.length + 1;
-  const engineerName = job.engineer ?? ENGINEER;
   const setResult = (index: number, patch: Partial<JobResult>) => setResults((all) => all.map((entry, position) => position === index ? { ...entry, ...patch } : entry));
   const [spareError, setSpareError] = useState("");
   const addSpare = () => {
@@ -403,17 +433,16 @@ function CompleteVisit({ job, store, close, flash }: { job: Job; store: ReturnTy
 
   const needsRemaining = outcome === "Partially completed" || outcome === "Follow-up required";
   const willResolve = outcome === "Work completed" || outcome === "Customer unavailable";
+  const needsCertification = needsCert && willResolve;
 
   const finish = () => {
     if (!outcome) return;
     const today = dateIso();
     updateStore((current) => {
-      // Only a completed Calibration job updates calibration history and the next due date —
-      // a generic service or repair job must leave the existing schedule untouched.
       const instrumentsNext = current.instruments.map((item) => {
         const result = results.find((entry) => entry.instrumentId === item.id);
-        if (!result || !isCalibration) return item;
-        return { ...item, history: [...item.history, { id: `cr-${Date.now()}-${item.id}`, date: today, engineer: engineerName, result: result.outcome, certificate: `CERT-2026-${String(300 + item.history.length).padStart(4, "0")}`, jobNumber: job.number }] };
+        if (!result || !needsCert || !certNumber.trim()) return item;
+        return { ...item, history: [...item.history, { id: `cr-${Date.now()}-${item.id}`, date: today, engineer: engineerName, result: result.outcome, certificate: certNumber.trim(), jobNumber: job.number }], certificateNumber: certNumber.trim(), certificateFile: certFile || undefined, nextDueDate: undefined, nextDueOverrideReason: undefined };
       });
       let quantities = current.quantities;
       const moves: StockMove[] = [];
@@ -424,33 +453,34 @@ function CompleteVisit({ job, store, close, flash }: { job: Job; store: ReturnTy
         quantities = quantities.map((row) => row.id === stockItem.id ? { ...row, balances: adjustBalance(row.balances, engineerName, -entry.quantity) } : row);
         moves.push({ id: `mv-job-${Date.now()}-${stockItem.id}`, date: today, at: prettyDate(today), action: "Usage on job", source: engineerName, destination: job.customer, quantity: entry.quantity, who: engineerName, document: job.number, item: entry.item, beforeBalance: before, afterBalance: Math.max(0, before - entry.quantity) });
       });
-      const followUpWindow = SLOT_TIMES[job.slot];
-      const nextVisit: JobVisit | null = scheduleFollowUp ? { id: `visit-${Date.now()}`, engineer: engineerName, plannedDate: followUpDate, plannedStart: followUpWindow.start, plannedEnd: followUpWindow.end } : null;
       const resolvesJob = willResolve && jobFullyResolved({ ...job, outcome: outcome || undefined });
       const jobs = current.jobs.map((entry) => entry.id !== job.id ? entry : {
         ...entry, status: resolvesJob ? "Completed" as const : entry.status, completedAt: resolvesJob ? today : entry.completedAt,
         results, usedSpares: used, travelNotes: travel, photos, signature: signed ? "signed" : undefined,
         outcome: outcome || undefined, outcomeNote: outcomeNote || undefined, remainingWork: needsRemaining ? remainingWork || undefined : undefined,
-        additionalVisits: nextVisit ? [...(entry.additionalVisits ?? []), nextVisit] : entry.additionalVisits,
-        activities: [{ title: `Visit outcome: ${outcome}${nextVisit ? ` — follow-up scheduled ${prettyDate(followUpDate)}` : ""}${resolvesJob ? " — job completed" : ""}`, meta: stamp(), tone: resolvesJob ? "done" as const : "system" as const }, ...entry.activities],
+        mastersUsed: mastersUsed.length ? mastersUsed : entry.mastersUsed,
+        certificateNumber: certNumber.trim() || entry.certificateNumber,
+        certificateFile: certFile || entry.certificateFile,
+        certificateGeneratedAt: certNumber.trim() ? today : entry.certificateGeneratedAt,
+        activities: [{ title: `Visit outcome: ${outcome}${certNumber.trim() ? ` — certificate ${certNumber.trim()}` : ""}${resolvesJob ? " — job completed" : ""}`, meta: stamp(), tone: resolvesJob ? "done" as const : "system" as const }, ...entry.activities],
       });
       return { instruments: instrumentsNext, quantities, moves: [...moves, ...current.moves], jobs };
     });
     close();
-    const dueList = isCalibration ? instruments.map((item) => item.intervalMonths ? `${item.name} → ${prettyDate(addMonths(today, item.intervalMonths))}` : `${item.name} → interval unknown, due date not set`) : [];
-    flash(willResolve ? `${job.number} — outcome recorded.${dueList.length ? ` Next due set: ${dueList.join(", ")}.` : isCalibration ? "" : " Calibration schedules are unchanged for a service/repair job."}${jobFullyResolved({ ...job, outcome: outcome || undefined }) ? " Ready to invoice." : ""}` : `${job.number} — outcome recorded. Job stays open until all visits are resolved.`);
+    const dueList = needsCert ? instruments.map((item) => item.intervalMonths ? `${item.name} → ${prettyDate(addDaysIso(today, item.intervalMonths * 30))}` : `${item.name} → interval unknown, due date not set`) : [];
+    flash(willResolve ? `${job.number} — outcome recorded.${dueList.length ? ` Next due set: ${dueList.join(", ")}.` : !needsCert ? " Calibration schedules are unchanged for a non-calibration job." : ""}${jobFullyResolved({ ...job, outcome: outcome || undefined }) ? " Ready to invoice." : ""}` : `${job.number} — outcome recorded. Job stays open until the visit is resolved.`);
   };
 
   const onInstrument = step < instruments.length;
   const current = onInstrument ? results[step] : null;
   const item = onInstrument ? instruments[step] : null;
   const canNext = !onInstrument || Boolean(current?.asFound.trim() && current?.asLeft.trim());
-  const canFinish = Boolean(outcome && outcomeNote.trim() && (!scheduleFollowUp || followUpDate));
+  const canFinish = Boolean(outcome && outcomeNote.trim() && (!needsCertification || (mastersUsed.length > 0 && certNumber.trim())));
 
   return <div className="stock-modal-backdrop" onClick={close}><section className="stock-move-modal complete-modal" role="dialog" aria-modal="true" aria-labelledby="complete-title" onClick={(event) => event.stopPropagation()}>
     <button className="stock-modal-close" onClick={close} aria-label="Close">×</button>
     <h2 id="complete-title">{onInstrument ? item?.name : "Visit outcome"}</h2>
-    {!isCalibration && <p className="po-start-hint">This is a {job.type.toLowerCase()} job — calibration due dates will not change.</p>}
+    {!needsCert && <p className="po-start-hint">This is a {job.type.toLowerCase()} job — no certificate is generated and calibration due dates will not change.</p>}
     <div className="complete-progress"><span>Step {step + 1} of {total}</span><div><i style={{ width: `${((step + 1) / total) * 100}%` }} /></div></div>
 
     {onInstrument && current && item && <div className="complete-body">
@@ -460,7 +490,6 @@ function CompleteVisit({ job, store, close, flash }: { job: Job; store: ReturnTy
       <div className="complete-outcome">{(["Pass", "Pass after adjustment", "Fail"] as const).map((entry) => <button key={entry} className={current.outcome === entry ? "is-active" : ""} onClick={() => setResult(step, { outcome: entry })}>{entry}</button>)}</div>
       <label className="due-notes"><span>Readings or observations</span><textarea value={current.readings} onChange={(event) => setResult(step, { readings: event.target.value })} placeholder="e.g. 10 V: 10.02 · 100 V: 99.8" /></label>
       <label className="due-notes"><span>Remarks</span><textarea value={current.remarks} onChange={(event) => setResult(step, { remarks: event.target.value })} /></label>
-      <label className="complete-file"><span>Certificate</span><input type="file" accept="application/pdf" /></label>
     </div>}
 
     {!onInstrument && <div className="complete-body">
@@ -478,14 +507,24 @@ function CompleteVisit({ job, store, close, flash }: { job: Job; store: ReturnTy
       <label className="complete-file"><span>Photos</span><input type="file" accept="image/*" multiple onChange={(event) => setPhotos(event.target.files?.length ?? 0)} /></label>
       <button className={`complete-sign${signed ? " is-signed" : ""}`} onClick={() => setSigned(!signed)}>{signed ? "✓ Customer signed" : "Get customer signature"}</button>
 
+      {needsCert && <>
+        <span className="due-spares-label">Reference standards used</span>
+        <div className="job-pick-list">{store.masters.map((master) => { const expired = masterExpired(master); return <label key={master.id} className={mastersUsed.includes(master.id) ? "is-ticked" : ""}>
+          <input type="checkbox" disabled={expired} checked={mastersUsed.includes(master.id)} onChange={(event) => setMastersUsed((all) => event.target.checked ? [...all, master.id] : all.filter((id) => id !== master.id))} />
+          <div><b>{master.name}</b><span>{master.serial} · next due {prettyDate(masterNextDue(master))}</span>{expired && <span className="job-late">Out of calibration — cannot be used</span>}</div>
+        </label>; })}</div>
+
+        <span className="due-spares-label">Certificate</span>
+        <label className="due-notes"><span>Certificate number</span><input value={certNumber} onChange={(event) => setCertNumber(event.target.value)} placeholder="e.g. CERT-2026-0301" /></label>
+        <div className="invoice-payment-footer"><span>Generate a printable certificate from the readings above</span><div><button className="settings-outline" onClick={() => { if (!certNumber.trim()) setCertNumber(`CERT-2026-${String(Date.now()).slice(-4)}`); setCertPreview(true); }}>Generate &amp; print</button></div></div>
+        <label className="complete-file"><span>Or upload the lab's own certificate file</span><input type="file" accept="application/pdf" onChange={(event) => setCertFile(event.target.files?.[0]?.name ?? "")} />{certFile && <small>{certFile}</small>}</label>
+      </>}
+
       <span className="due-spares-label">Visit outcome</span>
       <div className="complete-outcome complete-outcome--visit">{(["Work completed", "Partially completed", "Customer unavailable", "Follow-up required"] as VisitOutcome[]).map((entry) => <button key={entry} className={outcome === entry ? "is-active" : ""} onClick={() => setOutcome(entry)}>{entry}</button>)}</div>
       <label className="due-notes"><span>Outcome note</span><textarea value={outcomeNote} onChange={(event) => setOutcomeNote(event.target.value)} placeholder="Short note — required to mark the visit outcome" /></label>
-      {needsRemaining && <>
-        <label className="due-notes"><span>What remains</span><textarea value={remainingWork} onChange={(event) => setRemainingWork(event.target.value)} placeholder="What still needs doing" /></label>
-        <label className="settings-check"><input type="checkbox" checked={scheduleFollowUp} onChange={(event) => setScheduleFollowUp(event.target.checked)} /> Schedule a follow-up visit</label>
-        {scheduleFollowUp && <label className="assign-date"><span>Follow-up date</span><input type="date" value={followUpDate} onChange={(event) => setFollowUpDate(event.target.value)} /></label>}
-      </>}
+      {needsRemaining && <label className="due-notes"><span>What remains</span><textarea value={remainingWork} onChange={(event) => setRemainingWork(event.target.value)} placeholder="What still needs doing — reassign this job for the follow-up visit" /></label>}
+      {needsCertification && !(mastersUsed.length > 0 && certNumber.trim()) && <p className="stock-review-note">A calibration/validation job needs at least one reference standard and a certificate number before it can be marked complete.</p>}
     </div>}
 
     <div className="invoice-payment-footer complete-footer">
@@ -495,39 +534,33 @@ function CompleteVisit({ job, store, close, flash }: { job: Job; store: ReturnTy
         {onInstrument ? <button className="erp-action" disabled={!canNext} onClick={() => setStep(step + 1)}>Next</button> : <button className="erp-action" disabled={!canFinish} onClick={finish}>Save outcome</button>}
       </div>
     </div>
+    {certPreview && <CertificatePreview job={job} store={store} mastersUsed={mastersUsed} results={results} certNumber={certNumber || `CERT-2026-${String(Date.now()).slice(-4)}`} close={() => setCertPreview(false)} />}
   </section></div>;
 }
 
 /* ─── New job ────────────────────────────────────────────────────── */
-function NewJob({ store, close, done }: { store: ReturnType<typeof useErpStore>; close: () => void; done: (job: Job) => void }) {
-  const [doc, setDoc] = useState(blankJob(nextJobNumber(store.jobs)));
+function NewJob({ store, close, done, initial }: { store: ReturnType<typeof useErpStore>; close: () => void; done: (job: Job) => void; initial?: Partial<Job> }) {
+  const [doc, setDoc] = useState(blankJob(nextJobNumber(store.jobs), initial));
   const [schedule, setSchedule] = useState(false);
   const [error, setError] = useState("");
   const change = <K extends keyof Job>(key: K, value: Job[K]) => setDoc({ ...doc, [key]: value });
   const sites = customerSites.filter((site) => site.customer === doc.customer);
-  const rental = doc.type.startsWith("Rental");
-  const pickable = rental ? [] : store.instruments.filter((item) => item.siteId === doc.siteId && item.status === "Active");
-  const stockPickable = rental ? store.individuals.filter((item) => item.holder === "Store" && item.opStatus === "Available") : [];
-  const selectedCount = doc.instrumentIds.length + doc.stockIds.length;
-  const cap = schedule && doc.engineer && doc.scheduledDate ? dayCapacity(store.jobs, store.leaves, store.holidays, doc.engineer, doc.scheduledDate) : undefined;
-  const base = engineers.find((engineer) => engineer.name === doc.engineer)?.base;
-  const crossCity = base && !sameCity(base, siteById(doc.siteId)?.city);
+  const pickable = store.instruments.filter((item) => item.siteId === doc.siteId && item.status === "Active");
+  const selectedCount = doc.instrumentIds.length;
   const create = () => {
     if (!doc.customer || !doc.siteId) { setError("Select a customer and site."); return; }
     if (!doc.description.trim() && !selectedCount) { setError("Enter a work description or select at least one instrument."); return; }
     if (!Number.isFinite(doc.hours) || doc.hours <= 0) { setError("Estimated duration must be greater than zero."); return; }
     if (doc.instrumentIds.some((id) => openJobFor(store.jobs, id))) { setError("One or more selected instruments already have an active job. Review the linked job before creating another."); return; }
-    if (doc.stockIds.some((id) => store.jobs.some((job) => !["Completed", "Cancelled"].includes(job.status) && job.stockIds.includes(id)))) { setError("Selected equipment already belongs to an active job. Choose other equipment."); return; }
-    if (schedule && (!doc.engineer || !doc.scheduledDate || !doc.plannedStart || !doc.plannedEnd)) { setError("To schedule this job, choose an engineer, date, planned start and end. Otherwise turn off Schedule now."); return; }
-    if (schedule && (!cap || !fitsWindow(cap.freeSegments, doc.plannedStart!, doc.plannedEnd!, doc.travelAllowanceHours ?? 0))) { setError("Planned end must follow start, and the visit plus travel allowance must fit an available time slot."); return; }
-    const created: Job = schedule ? { ...doc, status: "Scheduled", slot: slotForStart(doc.plannedStart!), hours: (timeToMinutes(doc.plannedEnd!) - timeToMinutes(doc.plannedStart!)) / 60, activities: [{ title: `Job created and scheduled with ${doc.engineer}${crossCity ? " · Travel review required" : ""}`, meta: stamp(), tone: "assigned" }] } : { ...doc, scheduledDate: "", engineer: undefined, plannedStart: undefined, plannedEnd: undefined, travelAllowanceHours: undefined };
+    if (schedule && (!doc.engineer || !doc.scheduledDate || !doc.plannedStart)) { setError("To schedule this job, choose an engineer, date and time. Otherwise turn off Schedule now."); return; }
+    const created: Job = schedule ? { ...doc, status: "Scheduled", activities: [{ title: `Job created and scheduled with ${doc.engineer}`, meta: stamp(), tone: "assigned" }] } : { ...doc, scheduledDate: "", engineer: undefined, plannedStart: undefined };
     updateStore((current) => ({ jobs: [created, ...current.jobs] })); done(created);
   };
   return <Overlay label="New Job" onClose={close}><section className="stock-move-modal job-new-modal jobs-form-modal"><header className="jobs-form-header"><div><h2>New Job</h2><p>{doc.number}</p></div><button className="settings-outline" aria-label="Close New Job" onClick={close}>×</button></header><div className="jobs-form-body">
-    <section className="erp-form-section"><h3>Customer & Site</h3><div className="quote-header-grid ci-form-grid"><label><span>Customer <b className="lead-required">Required</b></span><select value={doc.customer} onChange={(event) => setDoc({ ...doc, customer: event.target.value, siteId: "", instrumentIds: [], stockIds: [] })}><option value="">Select customer</option>{customerMaster.map((entry) => <option key={entry.name}>{entry.name}</option>)}</select></label><label><span>Site <b className="lead-required">Required</b></span><select value={doc.siteId} disabled={!doc.customer} onChange={(event) => setDoc({ ...doc, siteId: event.target.value, instrumentIds: [], stockIds: [] })}><option value="">Select site</option>{sites.map((site) => <option key={site.id} value={site.id}>{site.name} · {site.city}</option>)}</select></label></div></section>
-    <section className="erp-form-section"><h3>Work Details</h3><div className="quote-header-grid ci-form-grid"><label><span>Job Type</span><select value={doc.type} onChange={(event) => setDoc({ ...doc, type: event.target.value as JobType, instrumentIds: [], stockIds: [] })}>{JOB_TYPES.map((type) => <option key={type}>{type}</option>)}</select></label><label><span>Work Location</span><select value={doc.doneAt} onChange={(event) => change("doneAt", event.target.value as Job["doneAt"])}><option>Customer site</option><option value="Our lab">At SPM</option></select></label><label><span>Estimated Duration (hours)</span><input type="number" min="0.25" step="0.25" value={doc.hours} onChange={(event) => change("hours", Number(event.target.value))} /></label><label><span>Priority</span><select value={doc.priority ?? "Normal"} onChange={(event) => change("priority", event.target.value as JobPriority)}>{["Low", "Normal", "High", "Urgent"].map((entry) => <option key={entry}>{entry}</option>)}</select></label><label className="quote-grid-wide"><span>Work Description</span><textarea value={doc.description} onChange={(event) => change("description", event.target.value)} /></label></div></section>
-    <section className="erp-form-section"><h3>Instruments <small>{selectedCount} selected</small></h3><div className="job-pick-list">{!doc.siteId && <p className="erp-muted">Select a customer and site to see instruments.</p>}{doc.siteId && !rental && !pickable.length && <p className="erp-muted">No active instruments at this site. You can save a job with a work description.</p>}{pickable.map((item) => { const conflict = openJobFor(store.jobs, item.id); return <label key={item.id} className={doc.instrumentIds.includes(item.id) ? "is-ticked" : ""}><input type="checkbox" disabled={Boolean(conflict)} checked={doc.instrumentIds.includes(item.id)} onChange={(event) => change("instrumentIds", event.target.checked ? [...doc.instrumentIds, item.id] : doc.instrumentIds.filter((id) => id !== item.id))} /><div><b>{item.name}</b><span>{item.make} {item.model} · {item.serial || `Asset ID: ${item.id}`}</span>{conflict && <span className="job-late">Already assigned: {conflict.number} · {conflict.status}</span>}</div></label>; })}{doc.siteId && stockPickable.map((item) => { const conflict = store.jobs.find((job) => !["Completed", "Cancelled"].includes(job.status) && job.stockIds.includes(item.id)); return <label key={item.id} className={doc.stockIds.includes(item.id) ? "is-ticked" : ""}><input type="checkbox" disabled={Boolean(conflict)} checked={doc.stockIds.includes(item.id)} onChange={(event) => change("stockIds", event.target.checked ? [...doc.stockIds, item.id] : doc.stockIds.filter((id) => id !== item.id))} /><div><b>{item.name}</b><span>{item.id} · {item.opStatus}</span>{conflict && <span className="job-late">Already assigned: {conflict.number}</span>}{item.calibrationDue && dayDifference(item.calibrationDue) < 0 && <span className="job-late">Calibration overdue · Review before issue</span>}</div></label>; })}</div>{selectedCount > 0 && <p className="jobs-selected-instruments">Selected: {[...store.instruments.filter((item) => doc.instrumentIds.includes(item.id)).map((item) => item.name), ...store.individuals.filter((item) => doc.stockIds.includes(item.id)).map((item) => item.name)].join(", ")}</p>}</section>
-    <section className="erp-form-section"><h3>Scheduling</h3><div className="quote-header-grid ci-form-grid"><label><span>Required Date (optional)</span><input type="date" value={doc.requiredDate ?? ""} onChange={(event) => change("requiredDate", event.target.value || undefined)} /><small>A requested deadline, not a confirmed appointment.</small></label><label className="jobs-checkbox-field"><input type="checkbox" checked={schedule} onChange={(event) => { setSchedule(event.target.checked); setError(""); }} /><span>Schedule now</span></label>{schedule && <><label><span>Scheduled Date</span><input type="date" value={doc.scheduledDate} onChange={(event) => change("scheduledDate", event.target.value)} /></label><label><span>Engineer</span><select value={doc.engineer ?? ""} onChange={(event) => change("engineer", event.target.value || undefined)}><option value="">Select engineer</option>{engineers.map((engineer) => <option key={engineer.name}>{engineer.name}</option>)}</select></label><label><span>Planned Start</span><input type="time" value={doc.plannedStart ?? ""} onChange={(event) => change("plannedStart", event.target.value)} /></label><label><span>Planned End</span><input type="time" value={doc.plannedEnd ?? ""} onChange={(event) => change("plannedEnd", event.target.value)} /></label><label><span>Travel allowance (hours)</span><input type="number" min="0" step="0.5" value={doc.travelAllowanceHours ?? 0} onChange={(event) => change("travelAllowanceHours", Math.max(0, Number(event.target.value)))} /></label></>}</div>{!schedule && <p className="erp-muted">Saved as unassigned with no appointment.</p>}{cap && <div className="jobs-free-slots"><h4>Available time slots</h4>{cap.freeSegments.length ? cap.freeSegments.map((segment) => <button key={segment.start} className="settings-outline" onClick={() => setDoc({ ...doc, plannedStart: segment.start, plannedEnd: minutesToTime(Math.min(timeToMinutes(segment.end) - (doc.travelAllowanceHours ?? 0) * 60, timeToMinutes(segment.start) + doc.hours * 60)) })}>{label12h(segment.start)}–{label12h(segment.end)}</button>) : <p className="job-late">{cap.blocked?.reason ?? "No available time"}. Choose another date or engineer.</p>}</div>}{crossCity && schedule && <p className="master-warning"><b>Travel review required</b><span>{doc.engineer} is based in {base}; this site is in {siteById(doc.siteId)?.city}. Confirm travel arrangements and allowance.</span></p>}</section>
+    <section className="erp-form-section"><h3>Customer & Site</h3><div className="quote-header-grid ci-form-grid"><label><span>Customer <b className="lead-required">Required</b></span><select value={doc.customer} onChange={(event) => setDoc({ ...doc, customer: event.target.value, siteId: "", instrumentIds: [] })}><option value="">Select customer</option>{store.customers.map((entry) => <option key={entry.id}>{entry.name}</option>)}</select></label><label><span>Site <b className="lead-required">Required</b></span><select value={doc.siteId} disabled={!doc.customer} onChange={(event) => setDoc({ ...doc, siteId: event.target.value, instrumentIds: [] })}><option value="">Select site</option>{sites.map((site) => <option key={site.id} value={site.id}>{site.name} · {site.city}</option>)}</select></label><label><span>Linked order <em className="lead-optional">Optional</em></span><input value={doc.orderRef ?? ""} onChange={(event) => change("orderRef", event.target.value || undefined)} placeholder="e.g. ORD-2026-0501" /></label></div></section>
+    <section className="erp-form-section"><h3>Work Details</h3><div className="quote-header-grid ci-form-grid"><label><span>Job Type</span><select value={doc.type} onChange={(event) => setDoc({ ...doc, type: event.target.value as JobType })}>{JOB_TYPES.map((type) => <option key={type}>{type}</option>)}</select></label><label><span>Work Location</span><select value={doc.doneAt} onChange={(event) => change("doneAt", event.target.value as Job["doneAt"])}><option>Site visit</option><option value="In-lab">In-lab</option></select></label><label><span>Estimated Duration (hours)</span><input type="number" min="0.25" step="0.25" value={doc.hours} onChange={(event) => change("hours", Number(event.target.value))} /></label><label className="quote-grid-wide"><span>Work Description</span><textarea value={doc.description} onChange={(event) => change("description", event.target.value)} /></label></div></section>
+    <section className="erp-form-section"><h3>Instruments <small>{selectedCount} selected</small></h3><div className="job-pick-list">{!doc.siteId && <p className="erp-muted">Select a customer and site to see instruments.</p>}{doc.siteId && !pickable.length && <p className="erp-muted">No active instruments at this site. You can save a job with a work description.</p>}{pickable.map((item) => { const conflict = openJobFor(store.jobs, item.id); return <label key={item.id} className={doc.instrumentIds.includes(item.id) ? "is-ticked" : ""}><input type="checkbox" disabled={Boolean(conflict)} checked={doc.instrumentIds.includes(item.id)} onChange={(event) => change("instrumentIds", event.target.checked ? [...doc.instrumentIds, item.id] : doc.instrumentIds.filter((id) => id !== item.id))} /><div><b>{item.name}</b><span>{item.make} {item.model} · {item.serial || `Asset ID: ${item.id}`}</span>{conflict && <span className="job-late">Already assigned: {conflict.number} · {conflict.status}</span>}</div></label>; })}</div></section>
+    <section className="erp-form-section"><h3>Scheduling</h3><div className="quote-header-grid ci-form-grid"><label><span>Required Date (optional)</span><input type="date" value={doc.requiredDate ?? ""} onChange={(event) => change("requiredDate", event.target.value || undefined)} /><small>A requested deadline, not a confirmed appointment.</small></label><label className="jobs-checkbox-field"><input type="checkbox" checked={schedule} onChange={(event) => { setSchedule(event.target.checked); setError(""); }} /><span>Schedule now</span></label>{schedule && <><label><span>Scheduled Date</span><input type="date" value={doc.scheduledDate} onChange={(event) => change("scheduledDate", event.target.value)} /></label><label><span>Engineer</span><select value={doc.engineer ?? ""} onChange={(event) => change("engineer", event.target.value || undefined)}><option value="">Select engineer</option>{engineers.map((engineer) => <option key={engineer.name}>{engineer.name}</option>)}</select></label><label><span>Time</span><input type="time" value={doc.plannedStart ?? "09:30"} onChange={(event) => change("plannedStart", event.target.value)} /></label></>}</div>{!schedule && <p className="erp-muted">Saved as unassigned with no appointment.</p>}</section>
     {error && <p className="jobs-form-error" role="alert">{error}</p>}
   </div><footer className="jobs-form-footer"><span>{selectedCount} instruments selected</span><button className="settings-outline" onClick={close}>Cancel</button><button className="erp-action" onClick={create}>Create Job</button></footer></section></Overlay>;
 }

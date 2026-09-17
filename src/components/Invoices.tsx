@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import spmLogo from "@/imports/SPM_Logo.png";
-import { COMPANY, INDIAN_STATES, customerMaster, stockCatalog, money, stamp, dateIso, dayDifference, prettyDate, lineValue, totalsFor, numberWords, type Quote } from "./erpMasters";
-import { balanceOf, invoicePaymentStatus, invoiceReceiptsApplied, invoiceStatusFor as statusFor, invoiceTdsRecorded, invoiceTotals, updateStore, useErpStore, type Invoice, type InvoiceDisplayStatus as DisplayStatus, type InvoiceLine, type InvoiceActivity } from "./erpStore";
+import { COMPANY, INDIAN_STATES, addMonths, siteById, stockCatalog, money, stamp, dateIso, dayDifference, prettyDate, lineValue, totalsFor, numberWords, type Customer, type Quote } from "./erpMasters";
+import { balanceOf, billingStatusOf, invoicePaymentStatus, invoiceReceiptsApplied, invoiceStatusFor as statusFor, invoiceTdsRecorded, invoiceTotals, rentalNextInvoiceDate, updateStore, useErpStore, type CustomerInstrument, type CustomerOrder, type Individual, type Invoice, type InvoiceDisplayStatus as DisplayStatus, type InvoiceLine, type InvoiceActivity, type Job, type Rental } from "./erpStore";
 import { RecordReceipt } from "./Accounts";
 
 const INVOICE_SERIES = { prefix: "INV-2026-", next: 119 };
@@ -51,7 +51,59 @@ export function invoiceFromQuote(quote: Quote, number: string): Invoice {
     placeOfSupply: quote.customerState, irn: "", ewayBill: "", freightCharges: quote.freightCharges ?? 0, overallDiscount: quote.overallDiscount ?? 0,
     items: quote.items.map((line) => ({ id: `${number}-${line.id}`, item: line.item, description: line.description, hsn: line.hsn, quantity: line.quantity, rate: line.rate, gst: line.gst, stockCode: stockCodeFor(line.item) })),
     fromQuote: `${quote.number} R${quote.revision}`,
+    orderRef: quote.orderRef,
     activities: [{ title: `Started from quotation ${quote.number} R${quote.revision}`, meta: stamp(), tone: "system" }],
+  };
+}
+
+export function invoiceFromOrder(order: CustomerOrder, number: string): Invoice {
+  const invoiceDate = dateIso();
+  return {
+    id: number, number, customer: order.customer, contact: order.contact, customerGstin: order.customerGstin, customerState: order.customerState,
+    billingAddress: order.billingAddress, shippingAddress: order.shippingAddress, paymentTerms: "Net 30",
+    invoiceDate, dueDate: dueDateFor(invoiceDate, "Net 30"), status: "Draft", invoiceType: order.orderType === "Sale" ? "Sales" : order.orderType,
+    poNumber: order.poNumber ?? "", poDate: order.poDate ?? "", deliveryNote: "", vehicleNumber: "",
+    placeOfSupply: order.customerState, irn: "", ewayBill: "", freightCharges: 0, overallDiscount: 0,
+    items: order.items.map((line) => ({ id: `${number}-${line.id}`, item: line.item, description: line.description, hsn: line.hsn, quantity: line.quantity, rate: line.rate, gst: line.gst, stockCode: stockCodeFor(line.item) })),
+    orderRef: order.number,
+    activities: [{ title: `Started from order ${order.number}`, meta: stamp(), tone: "system" }],
+  };
+}
+
+/** A service invoice from a completed job. Jobs carry no price list, so the line starts at
+ *  rate 0 — staff price it in the editor before sending, same as any hand-typed line. */
+export function invoiceFromJob(job: Job, instruments: CustomerInstrument[], customers: Customer[], number: string): Invoice {
+  const customer = customers.find((entry) => entry.name === job.customer);
+  const site = siteById(job.siteId);
+  const covered = instruments.filter((item) => job.instrumentIds.includes(item.id));
+  const invoiceDate = dateIso();
+  const description = [job.description, covered.length ? `Instruments: ${covered.map((item) => item.name).join(", ")}` : ""].filter(Boolean).join(" — ");
+  return {
+    id: number, number, customer: job.customer, contact: customer?.contact ?? "", customerGstin: customer?.gstin ?? "", customerState: customer?.state ?? COMPANY.state,
+    billingAddress: customer?.billing ?? "", shippingAddress: customer?.shipping ?? (site ? `${site.name}, ${site.city}` : ""), paymentTerms: customer?.paymentTerms ?? "Net 30",
+    invoiceDate, dueDate: dueDateFor(invoiceDate, customer?.paymentTerms ?? "Net 30"), status: "Draft", invoiceType: "Service",
+    poNumber: "", poDate: "", deliveryNote: "", vehicleNumber: "",
+    placeOfSupply: customer?.state ?? COMPANY.state, irn: "", ewayBill: "", freightCharges: 0, overallDiscount: 0,
+    items: [{ id: `${number}-1`, item: job.type, description, hsn: "9987", quantity: 1, rate: 0, gst: 18 }],
+    orderRef: job.orderRef,
+    activities: [{ title: `Started from job ${job.number}`, meta: stamp(), tone: "system" }],
+  };
+}
+
+/** One month's rent for a Rental — the customer/address details come from the customer master,
+ *  same as any other invoice; only the item line is rental-specific. */
+export function invoiceFromRental(rental: Rental, unit: Individual, customers: Customer[], number: string, periodLabel: string): Invoice {
+  const customer = customers.find((entry) => entry.name === rental.customer);
+  const invoiceDate = dateIso();
+  return {
+    id: number, number, customer: rental.customer, contact: customer?.contact ?? "", customerGstin: customer?.gstin ?? "", customerState: customer?.state ?? COMPANY.state,
+    billingAddress: customer?.billing ?? "", shippingAddress: customer?.shipping ?? "", paymentTerms: customer?.paymentTerms ?? "Net 30",
+    invoiceDate, dueDate: dueDateFor(invoiceDate, customer?.paymentTerms ?? "Net 30"), status: "Draft", invoiceType: "Rental",
+    poNumber: "", poDate: "", deliveryNote: "", vehicleNumber: "",
+    placeOfSupply: customer?.state ?? COMPANY.state, irn: "", ewayBill: "", freightCharges: 0, overallDiscount: 0,
+    items: [{ id: `${number}-1`, item: unit.name, description: `Rental — ${periodLabel} · ${unit.id} · ${rental.number}`, hsn: "9973", quantity: 1, rate: rental.monthlyRate, gst: 18 }],
+    orderRef: rental.orderRef || undefined,
+    activities: [{ title: `Rental invoice for ${periodLabel}`, meta: stamp(), tone: "system" }],
   };
 }
 
@@ -69,7 +121,7 @@ function blankInvoice(number: string): Invoice {
 
 export default function Invoices({ focusInvoice }: { focusInvoice?: string } = {}) {
   const store = useErpStore();
-  const { invoices, customerReceipts, customerTds, quotes } = store;
+  const { invoices, customerReceipts, customerTds, customerOrders, jobs, rentals, individuals, customers, instruments } = store;
   const setInvoices = (change: (all: Invoice[]) => Invoice[]) => updateStore((current) => ({ invoices: change(current.invoices) }));
   const [search, setSearch] = useState(""); const [status, setStatus] = useState("All invoices");
   const [editorId, setEditorId] = useState<string | null>(focusInvoice ?? null); const [choosing, setChoosing] = useState(false); const [toast, setToast] = useState("");
@@ -79,16 +131,39 @@ export default function Invoices({ focusInvoice }: { focusInvoice?: string } = {
     setInvoices((all) => all.some((item) => item.id === invoice.id) ? all.map((item) => item.id === invoice.id ? invoice : item) : [invoice, ...all]);
     setEditorId(invoice.id); if (message) flash(message);
   };
-  const startFromQuote = (quote: Quote) => { const invoice = invoiceFromQuote(quote, nextNumber(invoices)); setInvoices((all) => [invoice, ...all]); setEditorId(invoice.id); setChoosing(false); flash(`Ready from ${quote.number}. Check it and send.`); };
+  const startFromOrder = (order: CustomerOrder) => { const invoice = invoiceFromOrder(order, nextNumber(invoices)); setInvoices((all) => [invoice, ...all]); setEditorId(invoice.id); setChoosing(false); flash(`Ready from ${order.number}. Check it and send.`); };
+  const startFromJob = (job: Job) => {
+    const invoice = invoiceFromJob(job, instruments, customers, nextNumber(invoices));
+    updateStore((current) => ({
+      invoices: [invoice, ...current.invoices],
+      jobs: current.jobs.map((entry) => entry.id !== job.id ? entry : { ...entry, invoiceNumber: invoice.number, activities: [{ title: `Invoice ${invoice.number} created`, meta: stamp(), tone: "system" as const }, ...entry.activities] }),
+    }));
+    setEditorId(invoice.id); setChoosing(false); flash(`Ready from ${job.number}. Check it and send.`);
+  };
+  const startFromRental = (rental: Rental) => {
+    const unit = individuals.find((entry) => entry.id === rental.equipmentId);
+    if (!unit) return;
+    const periodStart = rentalNextInvoiceDate(rental);
+    const periodEnd = addMonths(periodStart, 1);
+    const invoice = invoiceFromRental(rental, unit, customers, nextNumber(invoices), `${prettyDate(periodStart)} – ${prettyDate(periodEnd)}`);
+    updateStore((current) => ({
+      invoices: [invoice, ...current.invoices],
+      rentals: current.rentals.map((entry) => entry.id !== rental.id ? entry : { ...entry, lastInvoicedThrough: periodEnd, activities: [{ title: `Rental invoice ${invoice.number} created`, meta: stamp(), tone: "system" as const }, ...entry.activities] }),
+    }));
+    setEditorId(invoice.id); setChoosing(false); flash(`Ready from ${rental.number}. Check it and send.`);
+  };
   const startBlank = () => { const invoice = blankInvoice(nextNumber(invoices)); setInvoices((all) => [invoice, ...all]); setEditorId(invoice.id); setChoosing(false); };
   const duplicate = (invoice: Invoice) => { const number = nextNumber(invoices); const copy: Invoice = { ...invoice, id: number, number, status: "Draft", sentAt: undefined, invoiceDate: dateIso(), dueDate: dueDateFor(dateIso(), invoice.paymentTerms), irn: "", ewayBill: "", activities: [{ title: `Copied from ${invoice.number}`, meta: stamp(), tone: "system" }] }; setInvoices((all) => [copy, ...all]); setEditorId(copy.id); flash("Copy created as a draft"); };
+
+  const invoiceableOrders = customerOrders.filter((order) => order.status === "Open" && order.orderType !== "Rental" && !invoices.some((invoice) => invoice.orderRef === order.number));
+  const invoiceableJobs = jobs.filter((job) => billingStatusOf(job) === "To invoice");
+  const invoiceableRentals = rentals.filter((rental) => rental.status === "Active");
 
   const unpaid = invoices.filter((invoice) => invoice.status === "Sent" && invoicePaymentStatus(invoice, customerReceipts, customerTds) !== "Paid");
   const overdue = invoices.filter((invoice) => statusFor(invoice, customerReceipts, customerTds) === "Overdue");
   const dueThisWeek = unpaid.filter((invoice) => dayDifference(invoice.dueDate) >= 0 && dayDifference(invoice.dueDate) <= 7);
   const thisMonth = dateIso().slice(0, 7);
-  // Cleared receipts only — collected excludes TDS and anything still pending clearance.
-  const collected = customerReceipts.filter((receipt) => receipt.status === "Posted" && receipt.clearance === "Cleared" && receipt.date.startsWith(thisMonth)).reduce((sum, receipt) => sum + receipt.amount, 0);
+  const collected = customerReceipts.filter((receipt) => receipt.date.startsWith(thisMonth)).reduce((sum, receipt) => sum + receipt.amount, 0);
   const cards = [
     ["Unpaid", String(unpaid.length), "Money still due", "unpaid", "Issued"],
     ["Overdue", String(overdue.length), "Past the due date", "overdue", "Overdue"],
@@ -131,27 +206,62 @@ export default function Invoices({ focusInvoice }: { focusInvoice?: string } = {
         <td><span className={statusClass(docStatus)}>{docLabel(docStatus)}</span></td>
         <td>{invoice.status === "Sent" ? <span className={statusClass(payStatus)}>{payStatus}</span> : <span className="erp-muted">—</span>}</td>
       </tr>; })}</tbody></table>
-      {!filtered.length && <div className="settings-empty"><b>{invoices.length ? "No invoices match what you typed" : "No invoices yet"}</b><p>{invoices.length ? "Clear the search box or pick a different status." : "Most invoices start from an accepted quotation — we will fill in the customer, items and taxes for you."}</p><button className="erp-action" onClick={() => setChoosing(true)}>+ New invoice</button></div>}
+      {!filtered.length && <div className="settings-empty"><b>{invoices.length ? "No invoices match what you typed" : "No invoices yet"}</b><p>{invoices.length ? "Clear the search box or pick a different status." : "Most invoices start from an order, a job or a rental — we will fill in the customer, items and taxes for you."}</p><button className="erp-action" onClick={() => setChoosing(true)}>+ New invoice</button></div>}
     </div>
 
-    {choosing && <StartInvoice close={() => setChoosing(false)} fromQuote={startFromQuote} blank={startBlank} quotes={quotes} />}
+    {choosing && <StartInvoice close={() => setChoosing(false)} fromOrder={startFromOrder} fromJob={startFromJob} fromRental={startFromRental} blank={startBlank} orders={invoiceableOrders} jobs={invoiceableJobs} rentals={invoiceableRentals} individuals={individuals} />}
     {toast && <div className="settings-toast" role="status">✓ {toast}</div>}
   </section>;
 }
 
-function StartInvoice({ close, fromQuote, blank, quotes }: { close: () => void; fromQuote: (quote: Quote) => void; blank: () => void; quotes: Quote[] }) {
-  const accepted = quotes.filter((quote) => quote.status === "Accepted");
+function StartInvoice({ close, fromOrder, fromJob, fromRental, blank, orders, jobs, rentals, individuals }: { close: () => void; fromOrder: (order: CustomerOrder) => void; fromJob: (job: Job) => void; fromRental: (rental: Rental) => void; blank: () => void; orders: CustomerOrder[]; jobs: Job[]; rentals: Rental[]; individuals: Individual[] }) {
+  const [step, setStep] = useState<"choose" | "order" | "job" | "rental">("choose");
   return <div className="stock-modal-backdrop" onClick={close}><section className="stock-move-modal invoice-start-modal" role="dialog" aria-modal="true" aria-labelledby="start-invoice-title" onClick={(event) => event.stopPropagation()}>
     <button className="stock-modal-close" onClick={close} aria-label="Close">×</button>
-    <h2 id="start-invoice-title">Start from an accepted quotation?</h2>
-    <p className="invoice-start-hint">Pick one and we will fill in the customer, addresses, GSTIN, items, taxes and PO number. You only have to check it.</p>
-    <div className="invoice-start-list">{accepted.map((quote) => {
-      const total = totalsFor(quote.items, quote.customerState === COMPANY.state, quote.overallDiscount ?? 0, quote.freightCharges ?? 0).grandTotal;
-      return <button key={quote.id} onClick={() => fromQuote(quote)}>
-        <div><b>{quote.customer}</b><span>{quote.subject}</span><small>{quote.number} R{quote.revision} · accepted {quote.acceptedDate}{quote.acceptedPo ? ` · PO ${quote.acceptedPo}` : ""}</small></div>
-        <div className="invoice-start-value"><b>{money(total)}</b><em>Use this →</em></div>
-      </button>; })}</div>
-    <div className="invoice-start-footer"><span>Not from a quotation?</span><button className="settings-outline" onClick={blank}>Start blank</button></div>
+    <h2 id="start-invoice-title">What are you invoicing?</h2>
+
+    {step === "choose" && <>
+      <p className="invoice-start-hint">Pick where this invoice comes from. You can change anything afterwards.</p>
+      <div className="po-start-choices">
+        <button onClick={() => setStep("order")}><b>From an order</b><span>{orders.length ? `${orders.length} order${orders.length === 1 ? "" : "s"} not yet invoiced` : "No open orders waiting to be invoiced"}</span></button>
+        <button onClick={() => setStep("job")}><b>From a job</b><span>{jobs.length ? `${jobs.length} completed job${jobs.length === 1 ? "" : "s"} ready to invoice` : "No completed jobs waiting to be invoiced"}</span></button>
+        <button onClick={() => setStep("rental")}><b>From a rental</b><span>{rentals.length ? `${rentals.length} active rental${rentals.length === 1 ? "" : "s"}` : "No active rentals"}</span></button>
+      </div>
+      <div className="invoice-start-footer"><span>Not from any of these?</span><button className="settings-outline" onClick={blank}>Start blank</button></div>
+    </>}
+
+    {step === "order" && <>
+      <p className="invoice-start-hint">Pick the order to invoice. We take the customer, items and taxes from it.</p>
+      <div className="invoice-start-list">{orders.map((order) => <button key={order.id} onClick={() => fromOrder(order)}>
+        <div><b>{order.customer}</b><span>{order.orderType}</span><small>{order.number} · {order.items.length} item{order.items.length === 1 ? "" : "s"}</small></div>
+        <div className="invoice-start-value"><em>Use this →</em></div>
+      </button>)}
+        {!orders.length && <p className="po-empty-note">No open order is currently waiting to be invoiced.</p>}
+      </div>
+      <div className="po-start-footer"><button className="settings-outline" onClick={() => setStep("choose")}>← Back</button></div>
+    </>}
+
+    {step === "job" && <>
+      <p className="invoice-start-hint">Pick the completed job to invoice. We take the customer and description from it.</p>
+      <div className="invoice-start-list">{jobs.map((job) => <button key={job.id} onClick={() => fromJob(job)}>
+        <div><b>{job.customer}</b><span>{job.type}</span><small>{job.number} · completed {job.scheduledDate ? prettyDate(job.scheduledDate) : ""}</small></div>
+        <div className="invoice-start-value"><em>Use this →</em></div>
+      </button>)}
+        {!jobs.length && <p className="po-empty-note">No completed job is currently waiting to be invoiced.</p>}
+      </div>
+      <div className="po-start-footer"><button className="settings-outline" onClick={() => setStep("choose")}>← Back</button></div>
+    </>}
+
+    {step === "rental" && <>
+      <p className="invoice-start-hint">Pick the active rental to invoice — a month's rent for that equipment.</p>
+      <div className="invoice-start-list">{rentals.map((rental) => { const unit = individuals.find((entry) => entry.id === rental.equipmentId); return <button key={rental.id} onClick={() => fromRental(rental)}>
+        <div><b>{rental.customer}</b><span>{unit?.name ?? rental.equipmentId}</span><small>{rental.number} · {money(rental.monthlyRate)}/mo</small></div>
+        <div className="invoice-start-value"><em>Use this →</em></div>
+      </button>; })}
+        {!rentals.length && <p className="po-empty-note">No rental is currently active.</p>}
+      </div>
+      <div className="po-start-footer"><button className="settings-outline" onClick={() => setStep("choose")}>← Back</button></div>
+    </>}
   </section></div>;
 }
 
@@ -168,7 +278,7 @@ function InvoiceEditor({ invoice, store, close, persist, duplicate, flash }: { i
 
   const change = <K extends keyof Invoice>(key: K, value: Invoice[K]) => setDoc({ ...doc, [key]: value });
   const chooseCustomer = (name: string) => {
-    const customer = customerMaster.find((item) => item.name === name);
+    const customer = store.customers.find((item) => item.name === name);
     if (!customer) { change("customer", name); return; }
     setDoc({ ...doc, customer: customer.name, contact: customer.contact, customerGstin: customer.gstin, customerState: customer.state, billingAddress: customer.billing, shippingAddress: customer.shipping, paymentTerms: customer.paymentTerms, placeOfSupply: customer.state, dueDate: dueDateFor(doc.invoiceDate, customer.paymentTerms) });
   };
@@ -199,6 +309,7 @@ function InvoiceEditor({ invoice, store, close, persist, duplicate, flash }: { i
       <span className={statusClass(docStatus)}>{docStatus}</span>
       {doc.status !== "Draft" && doc.status !== "Cancelled" && <span className={`invoice-due-chip${docStatus === "Overdue" ? " is-late" : ""}`}>{balance > 0 ? `${money(balance)} still due` : "Nothing due"}</span>}
       {doc.fromQuote && <span className="invoice-source-chip">From {doc.fromQuote}</span>}
+      {doc.orderRef && <span className="invoice-source-chip">Order {doc.orderRef}</span>}
     </div><div className="quote-editor-actions">
       {docStatus === "Draft" && <>
         <div className="quote-action-anchor"><button className="erp-action" onClick={trySend}>Send to customer</button>
@@ -224,7 +335,7 @@ function InvoiceEditor({ invoice, store, close, persist, duplicate, flash }: { i
 
       <section className="quote-document-section invoice-block">
         <div className="quote-section-title"><div><h2>1 · Customer</h2><span>Everything below fills in from the customer master.</span></div>{!locked && <button className="invoice-edit-link" onClick={() => setEditCustomer(!editCustomer)}>{editCustomer ? "Done" : "Edit"}</button>}</div>
-        {locked ? <p className="invoice-customer-name">{doc.customer}</p> : <label className="invoice-customer-picker"><span>Customer</span><input list="invoice-customers" value={doc.customer} onChange={(event) => chooseCustomer(event.target.value)} placeholder="Type a customer name" /><datalist id="invoice-customers">{customerMaster.map((customer) => <option key={customer.name} value={customer.name}>{customer.gstin}</option>)}</datalist></label>}
+        {locked ? <p className="invoice-customer-name">{doc.customer}</p> : <label className="invoice-customer-picker"><span>Customer</span><input list="invoice-customers" value={doc.customer} onChange={(event) => chooseCustomer(event.target.value)} placeholder="Type a customer name" /><datalist id="invoice-customers">{store.customers.map((customer) => <option key={customer.id} value={customer.name}>{customer.gstin}</option>)}</datalist></label>}
         {editCustomer && !locked
           ? <div className="quote-header-grid invoice-edit-grid">
               <label><span>Contact person</span><input value={doc.contact} onChange={(event) => change("contact", event.target.value)} /></label>
@@ -300,13 +411,13 @@ function InvoiceEditor({ invoice, store, close, persist, duplicate, flash }: { i
         </div>
       </details>
 
-      {(() => { const applied = customerReceipts.filter((receipt) => receipt.status === "Posted" && receipt.allocations.some((allocation) => allocation.invoiceId === doc.id));
+      {(() => { const applied = customerReceipts.filter((receipt) => receipt.allocations.some((allocation) => allocation.invoiceId === doc.id));
         const tdsEntries = customerTds.filter((entry) => entry.invoiceId === doc.id);
         if (!applied.length && !tdsEntries.length) return null;
         return <section className="quote-document-section invoice-block">
           <div className="quote-section-title"><div><h2>Money received</h2><span>Every receipt and TDS entry recorded against this invoice.</span></div></div>
-          <div className="invoice-payments">{applied.map((receipt) => { const allocation = receipt.allocations.find((entry) => entry.invoiceId === doc.id)!; return <div key={receipt.id}><b>{money(allocation.amount)}</b><span>{prettyDate(receipt.date)} · {receipt.mode}{receipt.reference ? ` · ${receipt.reference}` : ""}{receipt.clearance === "Pending Clearance" ? " · Pending clearance" : ""}</span></div>; })}
-          {tdsEntries.map((entry) => <div key={entry.id}><b>TDS {money(entry.amount)}</b><span>{prettyDate(entry.date)} · {entry.status === "Reversed" ? "Reversed" : entry.verification}{entry.reference ? ` · ${entry.reference}` : ""}</span></div>)}</div>
+          <div className="invoice-payments">{applied.map((receipt) => { const allocation = receipt.allocations.find((entry) => entry.invoiceId === doc.id)!; return <div key={receipt.id}><b>{money(allocation.amount)}</b><span>{prettyDate(receipt.date)} · {receipt.mode}{receipt.reference ? ` · ${receipt.reference}` : ""}</span></div>; })}
+          {tdsEntries.map((entry) => <div key={entry.id}><b>TDS {money(entry.amount)}</b><span>{prettyDate(entry.date)}{entry.reference ? ` · ${entry.reference}` : ""}</span></div>)}</div>
         </section>; })()}
 
       <section className="quote-document-section invoice-block">

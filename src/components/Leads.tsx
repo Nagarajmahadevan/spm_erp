@@ -52,7 +52,7 @@ function nextFollowUp(days: number) {
   return new Date(value.getTime() - offset * 60_000).toISOString().slice(0, 16);
 }
 
-export default function Leads() {
+export default function Leads({ openQuote }: { openQuote?: (quoteId: string) => void } = {}) {
   const { leads, quotes } = useErpStore();
   const setLeads = (change: (all: Lead[]) => Lead[]) => updateStore((current) => ({ leads: change(current.leads) }));
   const [search, setSearch] = useState("");
@@ -102,7 +102,7 @@ export default function Leads() {
     <div className="leads-toolbar"><div className="settings-list-search"><span>⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search leads" /></div><select value={stage} onChange={(event) => setStage(event.target.value)}><option>All stages</option>{stages.map((item) => <option key={item}>{item}</option>)}</select><select value={source} onChange={(event) => setSource(event.target.value)}><option>All sources</option>{["Website", "Phone", "WhatsApp", "Email", "Referral"].map((item) => <option key={item}>{item}</option>)}</select><select value={assigned} onChange={(event) => setAssigned(event.target.value)}><option>Everyone</option><option>Arun Kumar</option><option>Priya Shah</option></select><select value={followUp} onChange={(event) => setFollowUp(event.target.value)}><option>All follow-ups</option><option>Today</option><option>This week</option><option>Overdue</option></select></div>
     <div className="leads-table-wrap"><table className="leads-table"><thead><tr><th>Name & company</th><th>Source</th><th>Enquiry</th><th>Stage</th><th>Next follow-up</th><th>Assigned to</th></tr></thead><tbody>{filtered.map((lead) => { const label = followUpLabel(lead.followUpAt); return <tr key={lead.id} onClick={() => setDrawerId(lead.id)}><td><b>{lead.name}</b><small>{lead.company} {lead.auto && <em className="lead-auto">Auto-captured</em>}</small></td><td><span className="lead-source">{lead.source}</span></td><td className="lead-enquiry">{lead.enquiry}</td><td><span className={`lead-stage lead-stage--${stageClass(lead.stage)}`}>{lead.stage}</span></td><td className={label.startsWith("Overdue") ? "lead-overdue" : ""}>{label}</td><td><span className="lead-assignee"><i>{initials(lead.assigned)}</i>{lead.assigned}</span></td></tr>; })}</tbody></table>{!filtered.length && <div className="settings-empty"><b>No leads match these filters</b><p>Clear a filter or add a new enquiry to get started.</p><button className="erp-action" onClick={() => setCreating(true)}>+ New lead</button></div>}</div>
     {creating && <NewLead leads={leads} close={() => setCreating(false)} create={addLead} />}
-    {drawer && <LeadDrawer lead={drawer} quotes={quotes} close={() => setDrawerId(null)} update={updateLead} flash={flash} />}
+    {drawer && <LeadDrawer lead={drawer} quotes={quotes} close={() => setDrawerId(null)} update={updateLead} flash={flash} openQuote={openQuote} />}
     {toast && <div className="settings-toast" role="status">✓ {toast}</div>}
   </section>;
 }
@@ -116,7 +116,7 @@ function NewLead({ leads, close, create }: { leads: Lead[]; close: () => void; c
   return <div className="stock-modal-backdrop"><section className="stock-move-modal lead-new-modal" role="dialog" aria-modal="true" aria-labelledby="new-lead-title"><button className="stock-modal-close" onClick={close}>×</button><p>Sales / Leads</p><h2 id="new-lead-title">New lead</h2><p className="lead-form-intro">A quick capture now keeps the follow-up from slipping away.</p><form className="settings-form" onSubmit={(event) => { event.preventDefault(); submit(); }}><label><span>Name</span><input value={form.name} onChange={(event) => change("name", event.target.value)} autoFocus required /></label><label><span>Company</span><input value={form.company} onChange={(event) => change("company", event.target.value)} /></label><label><span>Phone <b className="lead-required">Required</b></span><input value={form.phone} onChange={(event) => change("phone", event.target.value)} inputMode="tel" required /></label><label><span>Email <em className="lead-optional">Optional</em></span><input value={form.email} onChange={(event) => change("email", event.target.value)} type="email" /></label>{duplicate && <div className="lead-duplicate">This looks like an existing lead: <button type="button" onClick={close}>View {duplicate.name}</button> · <button type="button" onClick={close}>Add a note there</button></div>}<label><span>Source</span><select value={form.source} onChange={(event) => change("source", event.target.value)}>{["Website", "Phone", "WhatsApp", "Email", "Referral"].map((item) => <option key={item}>{item}</option>)}</select></label><label><span>Assigned to</span><select value={form.assigned} onChange={(event) => change("assigned", event.target.value)}><option>Arun Kumar</option><option>Priya Shah</option></select></label><label className="lead-form-wide"><span>What they need</span><textarea value={form.need} onChange={(event) => change("need", event.target.value)} /></label><label><span>Next follow-up date <b className="lead-required">Required</b></span><input value={form.date} onChange={(event) => change("date", event.target.value)} type="date" required /></label><button className="erp-action" type="submit" disabled={!form.name.trim() || !form.phone.trim() || !form.date}>Create lead</button></form></section></div>;
 }
 
-function LeadDrawer({ lead, quotes, close, update, flash }: { lead: Lead; quotes: Quote[]; close: () => void; update: (id: string, patch: Partial<Lead>, message?: string) => void; flash: (message: string) => void }) {
+function LeadDrawer({ lead, quotes, close, update, flash, openQuote }: { lead: Lead; quotes: Quote[]; close: () => void; update: (id: string, patch: Partial<Lead>, message?: string) => void; flash: (message: string) => void; openQuote?: (quoteId: string) => void }) {
   const [note, setNote] = useState("");
   const [lostOpen, setLostOpen] = useState(false);
   const [lostReason, setLostReason] = useState("");
@@ -150,7 +150,8 @@ function LeadDrawer({ lead, quotes, close, update, flash }: { lead: Lead; quotes
       quotes: [quote, ...current.quotes],
       leads: current.leads.map((item) => item.id === lead.id ? { ...item, stage: "Quoted", activities: [{ title: `Quotation ${displayQuoteNumber(quote)} created`, meta: timestamp(), tone: "deal" }, ...(item.activities ?? defaultActivity(item))] } : item),
     }));
-    flash("Quotation created");
+    if (openQuote) openQuote(quote.id);
+    else flash("Quotation created");
   };
   const markWon = () => {
     updateStore((current) => ({

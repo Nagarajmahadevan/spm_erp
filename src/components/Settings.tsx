@@ -1,31 +1,30 @@
-import { ATTENDANCE_SETTINGS, JOB_SETTINGS, JOB_SLOTS, prettyDate } from "./erpMasters";
-import { resetStore, updateStore, useErpStore } from "./erpStore";
+import { dateIso, prettyDate } from "./erpMasters";
+import { masterNextDue, resetStore, updateStore, useErpStore } from "./erpStore";
 import DemoConsole from "./DemoConsole";
 import { createContext, useContext, useMemo, useState, type ReactNode } from "react";
 
-type Section = "Company" | "Users & Roles" | "Customers" | "Vendors" | "Equipment Categories" | "Locations" | "Expense Types" | "Alerts" | "Operations" | "Attendance Rules" | "Manual Check-in/Checkout" | "Tally Export";
+type Section = "Company" | "Users & Roles" | "Items & Categories" | "Master Instruments" | "Vendors" | "Expense Types" | "Alerts" | "Tally" | "Manual Check-in/Checkout";
 type Row = { name: string; detail: string; status?: "Active" | "Inactive"; values?: Record<string, string> };
 
 const configs: Record<Section, { description: string; rows: Row[]; importable?: boolean }> = {
   "Company": { description: "Business identity, invoice numbering and defaults used across SPM ERP.", rows: [] },
   "Users & Roles": { description: "Invite teammates and define what each role can access.", rows: [{ name: "Arun Kumar", detail: "arun@spmlabsolutions.com · Admin", status: "Active", values: { "Full name": "Arun Kumar", "Email": "arun@spmlabsolutions.com", "Phone": "+91 98450 22110", "Role": "Admin" } }, { name: "Priya Shah", detail: "priya@spmlabsolutions.com · Office", status: "Active", values: { "Full name": "Priya Shah", "Email": "priya@spmlabsolutions.com", "Phone": "+91 98204 81291", "Role": "Office" } }, { name: "Nikhil Rao", detail: "nikhil@spmlabsolutions.com · Engineer", status: "Inactive", values: { "Full name": "Nikhil Rao", "Email": "nikhil@spmlabsolutions.com", "Phone": "+91 99805 77722", "Role": "Engineer" } }] },
-  "Customers": { description: "Customers and their default billing information.", rows: [{ name: "Nova Instruments", detail: "Bengaluru, Karnataka · Net 30", status: "Active" }, { name: "Arka Diagnostics", detail: "Mumbai, Maharashtra · Net 45", status: "Active" }], importable: true },
+  "Items & Categories": { description: "Classification, tracking and reorder defaults for stock items.", rows: [{ name: "Instruments", detail: "Root category · Individual tracking", status: "Active" }, { name: "Spares", detail: "Root category · Quantity tracking", status: "Active" }, { name: "Calibration kits", detail: "Parent: Instruments · Individual tracking", status: "Active" }], importable: true },
+  "Master Instruments": { description: "Reference standards used to calibrate customer instruments.", rows: [] },
   "Vendors": { description: "Supplier records, tax settings and contacts.", rows: [{ name: "Precision Systems India", detail: "Pune · TDS 1%", status: "Active" }, { name: "Nanotech Supplies", detail: "Chennai · TDS not applicable", status: "Inactive" }], importable: true },
-  "Equipment Categories": { description: "Classification, tracking and reorder defaults for stock items.", rows: [{ name: "Instruments", detail: "Root category · Individual tracking", status: "Active" }, { name: "Spares", detail: "Root category · Quantity tracking", status: "Active" }, { name: "Calibration kits", detail: "Parent: Instruments · Individual tracking", status: "Active" }], importable: true },
-  "Locations": { description: "Every place where your equipment can be assigned or stored.", rows: [{ name: "Bengaluru Office", detail: "Office · Indiranagar", status: "Active" }, { name: "Central Warehouse", detail: "Warehouse · Peenya", status: "Active" }, { name: "Nova Instruments site", detail: "Customer site · Nova Instruments", status: "Active" }, { name: "Nikhil Rao", detail: "Engineer · linked user: Nikhil Rao", status: "Active" }] },
   "Expense Types": { description: "Expense categories available to engineers and office teams.", rows: [{ name: "Travel", detail: "Both · bill photo required", status: "Active" }, { name: "Internet", detail: "Company expenses · recurring monthly", status: "Active" }, { name: "Food", detail: "Engineer claims", status: "Active" }] },
   "Alerts": { description: "Control lead times, recipients and delivery channels.", rows: [] },
-  "Operations": { description: "Job scheduling limits and calibration defaults.", rows: [] },
-  "Attendance Rules": { description: "Working hours, weekly off and holidays used by Attendance and the Jobs schedule.", rows: [] },
+  "Tally": { description: "Map ERP records to Tally ledgers and export settings.", rows: [] },
   "Manual Check-in/Checkout": { description: "Manually log a site or office check-in/checkout for an engineer, and reset the sample data.", rows: [] },
-  "Tally Export": { description: "Map ERP records to Tally ledgers and export settings.", rows: [] },
 };
 
-const sections = Object.keys(configs) as Section[];
-const modules = ["Dashboard", "Attendance", "Advance & Expense", "Leads", "Quotations", "Purchase Orders", "Invoices", "Stock", "Due Dates", "Accounts", "Reports", "Settings"];
-const approveModules = new Set(["Quotations", "Purchase Orders", "Advance & Expense"]);
+const ALL_SECTIONS = Object.keys(configs) as Section[];
+const modules = ["Dashboard", "Attendance", "Expenses", "Leads", "Quotations", "Orders", "Purchases", "Rentals", "Customers", "Invoices", "Stock", "Accounts", "Reports", "Settings"];
+const approveModules = new Set(["Quotations", "Purchases", "Expenses"]);
 
 export default function Settings() {
+  const demoMode = useMemo(() => new URLSearchParams(window.location.search).get("demo") === "1", []);
+  const sections = useMemo(() => ALL_SECTIONS.filter((item) => demoMode || item !== "Manual Check-in/Checkout"), [demoMode]);
   const [section, setSection] = useState<Section>("Company");
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState("Active");
@@ -33,7 +32,7 @@ export default function Settings() {
   const [toast, setToast] = useState("");
   const [userTab, setUserTab] = useState<"Users" | "Roles">("Users");
   const config = configs[section];
-  const isFormPage = section === "Company" || section === "Alerts" || section === "Operations" || section === "Attendance Rules" || section === "Manual Check-in/Checkout" || section === "Tally Export";
+  const isFormPage = section === "Company" || section === "Alerts" || section === "Manual Check-in/Checkout" || section === "Tally" || section === "Master Instruments";
   const rows = useMemo(() => config.rows.filter((row) => row.name.toLowerCase().includes(query.toLowerCase()) && (filter === "All" || row.status === filter)), [config, query, filter]);
   const notify = (message: string) => { setToast(message); window.setTimeout(() => setToast(""), 2800); };
   const listMode = !isFormPage && !(section === "Users & Roles" && userTab === "Roles");
@@ -47,7 +46,7 @@ export default function Settings() {
       <div className="settings-workspace">
         <div className="settings-workspace-head"><div><h2>{section}</h2><p>{config.description}</p></div>{listMode && <button className="erp-action" onClick={() => setDrawer("new")}>+ Add {section === "Users & Roles" ? "user" : section.slice(0, -1)}</button>}</div>
         {section === "Users & Roles" && <div className="settings-tabs"><button className={userTab === "Users" ? "is-active" : ""} onClick={() => setUserTab("Users")}>Users</button><button className={userTab === "Roles" ? "is-active" : ""} onClick={() => setUserTab("Roles")}>Roles</button></div>}
-        {section === "Company" ? <CompanyForm onSave={() => notify("Company settings saved")} /> : section === "Alerts" ? <AlertsForm onSave={() => notify("Alert preferences saved")} /> : section === "Operations" ? <OperationsForm onSave={() => notify("Operations settings saved")} /> : section === "Attendance Rules" ? <AttendanceRulesForm onSave={() => notify("Attendance rules saved")} /> : section === "Manual Check-in/Checkout" ? <ManualCheckInSection /> : section === "Tally Export" ? <TallyForm onSave={() => notify("Tally export settings saved")} /> : section === "Users & Roles" && userTab === "Roles" ? <RolePermissions onSave={() => notify("Role permissions saved")} /> : <>
+        {section === "Company" ? <CompanyForm onSave={() => notify("Company settings saved")} /> : section === "Alerts" ? <AlertsForm onSave={() => notify("Alert preferences saved")} /> : section === "Manual Check-in/Checkout" ? <ManualCheckInSection /> : section === "Tally" ? <TallyForm onSave={() => notify("Tally export settings saved")} /> : section === "Master Instruments" ? <MasterInstrumentsSection /> : section === "Users & Roles" && userTab === "Roles" ? <RolePermissions onSave={() => notify("Role permissions saved")} /> : <>
           <div className="settings-toolbar"><div className="settings-list-search"><span>⌕</span><input aria-label={`Search ${title}`} value={query} onChange={(e) => setQuery(e.target.value)} placeholder={`Search ${title.toLowerCase()}…`} /></div><span className="settings-count">{rows.length} records</span><select aria-label="Record status filter" value={filter} onChange={(e) => setFilter(e.target.value)}><option>Active</option><option>Inactive</option><option>All</option></select>{config.importable && <><button className="settings-link" onClick={() => notify("CSV template downloaded")}>Download template</button><button className="settings-link" onClick={() => notify("Choose a CSV file to import")}>Import CSV</button></>}</div>
           <div className="settings-list">{rows.map((row) => <button key={row.name} onClick={() => setDrawer(row)} className="settings-row"><span className="settings-row-avatar">{row.name.slice(0, 1)}</span><span><b>{row.name}</b><small>{row.detail}</small></span><em className={row.status === "Inactive" ? "is-inactive" : ""}>{row.status}</em><span className="settings-row-arrow">›</span></button>)}</div>
         </>}
@@ -74,7 +73,7 @@ const Submit = ({ text = "Save changes" }: { text?: string }) => { const { dirty
 function Drawer({ section, record, close, save }: { section: Section; record?: Row; close: () => void; save: (message: string) => void }) {
   const [dirty, setDirty] = useState(false);
   const attemptClose = () => { if (!dirty || window.confirm("Discard unsaved changes?")) close(); };
-  return <aside className="settings-drawer" aria-label="Edit record"><div className="settings-drawer-head"><div><p>{section}</p><div className="drawer-title-row"><h2>{record?.name ?? `Add ${section === "Users & Roles" ? "user" : section.slice(0, -1)}`}</h2>{section === "Customers" && record && <div className="customer-summary customer-summary--inline"><button>₹ 1,24,600 <small>Outstanding</small></button><button>3 <small>Open quotes</small></button></div>}</div></div><button onClick={attemptClose}>×</button></div>
+  return <aside className="settings-drawer" aria-label="Edit record"><div className="settings-drawer-head"><div><p>{section}</p><div className="drawer-title-row"><h2>{record?.name ?? `Add ${section === "Users & Roles" ? "user" : section.slice(0, -1)}`}</h2></div></div><button onClick={attemptClose}>×</button></div>
     <FormShell onDirtyChange={setDirty} onSave={() => save("Record saved")}>
       {section === "Users & Roles" ? <><Field label="Full name" value={record?.values?.["Full name"]} /><Field label="Email" type="email" value={record?.values?.Email} /><Field label="Phone" value={record?.values?.Phone} /><Field label="Role" value={record?.values?.Role} options={["Admin", "Office", "Engineer"]} /><Toggle label="Active" defaultChecked={record?.status !== "Inactive"} /><div className="settings-inline-actions"><button type="button">Resend invite</button><button type="button">Reset password</button></div></> : <RecordFields section={section} />}
       <Submit />
@@ -83,10 +82,8 @@ function Drawer({ section, record, close, save }: { section: Section; record?: R
 }
 
 function RecordFields({ section }: { section: Section }) {
-  if (section === "Customers") return <><Field label="Company name" /><Field label="Contact person" /><Field label="Phone" /><Field label="Email" type="email" /><Field label="GSTIN" /><Field label="City" /><Field label="State" /><Field label="Payment terms" options={["Net 15", "Net 30", "Net 45", "Due on receipt"]} /><Field label="Billing address" type="textarea" /><label className="settings-check"><input type="checkbox" defaultChecked /> Same as billing address</label><Field label="Shipping address" type="textarea" /><Toggle label="Active" /></>;
   if (section === "Vendors") return <><Field label="Company name" /><Field label="Contact person" /><Field label="Phone" /><Field label="Email" type="email" /><Field label="GSTIN" /><Field label="PAN" /><Field label="Billing address" type="textarea" /><Field label="Payment terms" options={["Net 15", "Net 30", "Net 45"]} /><Toggle label="TDS applicable" /><Field label="TDS section" value="194C — Contractors" options={["194C — Contractors", "194I — Rent", "194J — Professional fees", "194Q — Purchase of goods"]} /><Field label="TDS rate (%)" value="1" /><Toggle label="Active" /></>;
-  if (section === "Equipment Categories") return <><Field label="Category name" /><Field label="Parent category" value="None (root category)" options={["None (root category)", "Instruments", "Spares", "Consumables"]} /><Field label="Tracking type" value="Individual" options={["Individual", "Quantity"]} /><Field label="Unit of measure" value="Each" options={["Each", "Box", "Set", "Litre"]} /><Field label="Default minimum stock level" value="2" /><Field label="Internal equipment ID prefix" value="INS" /><Toggle label="Active" /></>;
-  if (section === "Locations") return <><Field label="Location name" /><Field label="Location type" value="Office" options={["Office", "Warehouse", "Customer site", "Engineer"]} /><Field label="Linked customer" value="Nova Instruments" options={["Nova Instruments", "Arka Diagnostics"]} /><Field label="Linked user" value="Nikhil Rao" options={["Nikhil Rao", "Arun Kumar", "Priya Shah"]} /><Field label="Address" type="textarea" /><Toggle label="Active" /></>;
+  if (section === "Items & Categories") return <><Field label="Category name" /><Field label="Parent category" value="None (root category)" options={["None (root category)", "Instruments", "Spares", "Consumables"]} /><Field label="Tracking type" value="Individual" options={["Individual", "Quantity"]} /><Field label="Unit of measure" value="Each" options={["Each", "Box", "Set", "Litre"]} /><Field label="Default minimum stock level" value="2" /><Field label="Internal equipment ID prefix" value="INS" /><Toggle label="Active" /></>;
   return <><Field label="Expense type" /><Field label="Description" type="textarea" /><Field label="Applies to" value="Both" options={["Engineer claims", "Company expenses", "Both"]} /><Toggle label="Bill photo required" /><Toggle label="TDS applicable" /><Field label="TDS section" value="194C — Contractors" options={["194C — Contractors", "194J — Professional fees"]} /><Field label="TDS rate (%)" value="1" /><Toggle label="Recurring monthly" /><Field label="Due day of month" value="5" type="number" /><Toggle label="Active" /></>;
 }
 
@@ -98,16 +95,38 @@ function TallyForm({ onSave }: { onSave: () => void }) { const ledgers = [["Sale
 
 function RolePermissions({ onSave }: { onSave: () => void }) { return <FormShell className="permission-grid" onSave={onSave}><div className="settings-workspace-head"><div><h3>Role permissions</h3><p>Grant module access for the selected role.</p></div><Field label="Role" value="Office" options={["Admin", "Office", "Engineer"]} /></div><div className="permission-table"><div className="permission-header"><span>Module</span><span>View</span><span>Create</span><span>Approve</span></div>{modules.map((module) => <div className="permission-row" key={module}><b>{module}</b><input type="checkbox" defaultChecked />{module === "Dashboard" ? <><i>—</i><i>—</i><i>—</i></> : <><input type="checkbox" defaultChecked /><input type="checkbox" defaultChecked />{approveModules.has(module) ? <input type="checkbox" /> : <i>—</i>}</>}</div>)}</div><Submit text="Save role permissions" /></FormShell>; }
 
-function OperationsForm({ onSave }: { onSave: () => void }) {
-  return <form className="settings-form" onSubmit={(event) => { event.preventDefault(); onSave(); }}>
-    <div className="settings-form-grid">
-      <label className="settings-field"><span>Jobs one engineer can take in a day</span><input type="number" min="1" max="10" defaultValue={JOB_SETTINGS.engineerDailyLimit} /><small>The schedule board turns amber at this number and red above it.</small></label>
-      <label className="settings-field"><span>Default calibration interval</span><select defaultValue={String(JOB_SETTINGS.defaultCalibrationMonths)}>{[3, 6, 12, 24, 36].map((months) => <option key={months} value={months}>{months} months</option>)}</select><small>Used when a new customer instrument does not say.</small></label>
-      <label className="settings-field"><span>Default job slot</span><select defaultValue={JOB_SETTINGS.defaultSlot}>{JOB_SLOTS.map((slot) => <option key={slot}>{slot}</option>)}</select><small>Morning, afternoon or a full day.</small></label>
-      <label className="settings-field"><span>Who hears about unassigned jobs</span><input defaultValue={JOB_SETTINGS.unassignedAlertTo.join(", ")} /><small>They get a note when a job has nobody on it.</small></label>
-    </div>
-    <button className="erp-action" type="submit">Save operations settings</button>
-  </form>;
+function MasterInstrumentsSection() {
+  const store = useErpStore();
+  const blank = { name: "", serial: "", accuracy: "", intervalMonths: "12", lab: "", lastCalibrated: dateIso(), certificate: "" };
+  const [form, setForm] = useState(blank);
+  const change = (key: keyof typeof blank, value: string) => setForm({ ...form, [key]: value });
+  const addMaster = () => {
+    if (!form.name.trim() || !form.serial.trim()) return;
+    updateStore((current) => ({ masters: [...current.masters, { id: `MST-${Date.now()}`, name: form.name.trim(), serial: form.serial.trim(), accuracy: form.accuracy.trim(), intervalMonths: Number(form.intervalMonths) || 12, lab: form.lab.trim(), lastCalibrated: form.lastCalibrated, certificate: form.certificate.trim() }] }));
+    setForm(blank);
+  };
+  const removeMaster = (id: string) => updateStore((current) => ({ masters: current.masters.filter((entry) => entry.id !== id) }));
+
+  return <div className="settings-form">
+    <section className="settings-subsection">
+      <h3>Add a master instrument</h3>
+      <div className="settings-form-grid">
+        <label className="settings-field"><span>Name</span><input value={form.name} onChange={(event) => change("name", event.target.value)} /></label>
+        <label className="settings-field"><span>Serial number</span><input value={form.serial} onChange={(event) => change("serial", event.target.value)} /></label>
+        <label className="settings-field"><span>Accuracy</span><input value={form.accuracy} onChange={(event) => change("accuracy", event.target.value)} placeholder="e.g. ±0.5%" /></label>
+        <label className="settings-field"><span>Calibration interval (months)</span><input type="number" min="1" value={form.intervalMonths} onChange={(event) => change("intervalMonths", event.target.value)} /></label>
+        <label className="settings-field"><span>Calibrating lab</span><input value={form.lab} onChange={(event) => change("lab", event.target.value)} /></label>
+        <label className="settings-field"><span>Last calibrated</span><input type="date" value={form.lastCalibrated} onChange={(event) => change("lastCalibrated", event.target.value)} /></label>
+        <label className="settings-field"><span>Certificate number</span><input value={form.certificate} onChange={(event) => change("certificate", event.target.value)} /></label>
+      </div>
+      <button type="button" className="settings-outline" onClick={addMaster} disabled={!form.name.trim() || !form.serial.trim()}>Add master instrument</button>
+    </section>
+    <section className="settings-subsection">
+      <h3>Master instruments</h3>
+      {store.masters.length > 0 && <ul className="due-spare-list">{store.masters.map((master) => <li key={master.id}>{master.name} · {master.serial} — next due {prettyDate(masterNextDue(master))}<button type="button" onClick={() => removeMaster(master.id)} aria-label="Remove">×</button></li>)}</ul>}
+      {!store.masters.length && <p className="settings-notice">No master instruments recorded yet.</p>}
+    </section>
+  </div>;
 }
 
 function ManualCheckInSection() {
@@ -128,32 +147,3 @@ function ManualCheckInSection() {
   </div>;
 }
 
-const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-function AttendanceRulesForm({ onSave }: { onSave: () => void }) {
-  const store = useErpStore();
-  const [name, setName] = useState(""); const [date, setDate] = useState("");
-  const addHoliday = () => {
-    if (!name.trim() || !date) return;
-    updateStore((current) => ({ holidays: [...current.holidays, { id: `HOL-${Date.now()}`, date, name }].sort((a, b) => a.date.localeCompare(b.date)) }));
-    setName(""); setDate("");
-  };
-  const removeHoliday = (id: string) => updateStore((current) => ({ holidays: current.holidays.filter((entry) => entry.id !== id) }));
-
-  return <form className="settings-form" onSubmit={(event) => { event.preventDefault(); onSave(); }}>
-    <div className="settings-form-grid">
-      <label className="settings-field"><span>Working hours start</span><input type="time" defaultValue={ATTENDANCE_SETTINGS.workStart} /></label>
-      <label className="settings-field"><span>Working hours end</span><input type="time" defaultValue={ATTENDANCE_SETTINGS.workEnd} /></label>
-      <label className="settings-field"><span>Weekly off</span><select defaultValue={String(ATTENDANCE_SETTINGS.weeklyOff[0])}>{WEEKDAYS.map((day, index) => <option key={day} value={index}>{day}</option>)}</select><small>Used to compute schedule capacity.</small></label>
-      <label className="settings-field"><span>Late grace period (minutes)</span><input type="number" min="0" defaultValue={ATTENDANCE_SETTINGS.lateGraceMinutesDemo} /><small>A visit is only flagged "Check-in Not Received" after this grace window.</small></label>
-      <label className="settings-field"><span>Site check-in radius (metres)</span><input type="number" min="10" defaultValue={ATTENDANCE_SETTINGS.siteRadiusMetersDemo} /><small>How far from the site a check-in can be and still count as on-site.</small></label>
-    </div>
-    <button className="erp-action" type="submit">Save attendance rules</button>
-
-    <section className="settings-subsection">
-      <h3>Holidays</h3>
-      <div className="due-spare-add"><input placeholder="Holiday name" value={name} onChange={(event) => setName(event.target.value)} /><input type="date" value={date} onChange={(event) => setDate(event.target.value)} /><button type="button" className="settings-outline" onClick={addHoliday} disabled={!name.trim() || !date}>Add</button></div>
-      {store.holidays.length > 0 && <ul className="due-spare-list">{store.holidays.map((holiday) => <li key={holiday.id}>{prettyDate(holiday.date)} — {holiday.name}<button type="button" onClick={() => removeHoliday(holiday.id)} aria-label="Remove">×</button></li>)}</ul>}
-      {!store.holidays.length && <p className="settings-notice">No holidays configured yet.</p>}
-    </section>
-  </form>;
-}

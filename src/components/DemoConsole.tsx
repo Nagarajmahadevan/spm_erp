@@ -31,7 +31,7 @@ export default function DemoConsole({ jobs }: { jobs: Job[] }) {
     if (!job) { flash("Pick a job first."); return; }
     const at = fromLocalInput(occurredAt); const synced = fromLocalInput(syncedAt);
     const stamp = demoLocationStamp(preset, site, at, synced, "Mobile");
-    updateStore((current) => applyVisitStamp(current, job.id, undefined, action, stamp));
+    updateStore((current) => applyVisitStamp(current, job.id, action, stamp));
     flash(`Simulated ${action === "checkIn" ? "check-in" : "checkout"} for ${job.engineer} on ${job.number} (${stamp.locationCheck}).`);
   };
 

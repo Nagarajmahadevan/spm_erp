@@ -2,7 +2,7 @@
 // a PO that is still awaiting delivery shows as "On order" in Stock, and receiving a PO
 // puts the goods on the shelf without anyone re-keying them.
 import { useSyncExternalStore } from "react";
-import { APPROVER, ATTENDANCE_SETTINGS, COMPANY, JOB_SETTINGS, JOB_TYPE_SKILL, SLOT_TIMES, WAREHOUSE, addDaysIso, addMonths, dateIso, dayDifference, isoDateInIst, isWeeklyOff, engineers, customerSites, metersBetween, minutesToTime, nowIso, prettyDate, stamp, timeToMinutes, totalsFor, initialQuotes, type Quote } from "./erpMasters";
+import { APPROVER, ATTENDANCE_SETTINGS, COMPANY, JOB_SETTINGS, STOCK_LOCATIONS, WAREHOUSE, addDaysIso, addMonths, dateIso, dayDifference, isoDateInIst, isWeeklyOff, engineers, customerMaster, customerSites, metersBetween, minutesToTime, nowIso, prettyDate, stamp, timeToMinutes, totalsFor, initialQuotes, type Customer, type Quote, type QuoteLine } from "./erpMasters";
 
 // Equipment SPM owns and tracks unit by unit. Ownership (always SPM here), current holder,
 // operational status and calibration are kept as separate facts — a unit with an engineer
@@ -49,10 +49,10 @@ export function nextEquipmentIds(individuals: Individual[], count: number) {
   return Array.from({ length: count }, (_, index) => `INS-${String(highest + index + 1).padStart(4, "0")}`);
 }
 
-export type POStatus = "Draft" | "Awaiting approval" | "Sent" | "Partly received" | "Received" | "Cancelled";
+export type POStatus = "Draft" | "Sent" | "Partly received" | "Received" | "Cancelled";
 export type POLine = { id: string; item: string; description: string; hsn: string; quantity: number; rate: number; gst: number; stockId?: string; tracked?: boolean; received: number; serials: string[] };
 export type Receipt = { id: string; date: string; location: string; challan: string; note: string; lines: { lineId: string; quantity: number; serials: string[] }[] };
-export type POActivity = { title: string; meta: string; tone?: "sent" | "received" | "approved" | "rejected" | "system" };
+export type POActivity = { title: string; meta: string; tone?: "sent" | "received" | "approved" | "system" };
 export type PurchaseOrder = {
   id: string;
   number: string;
@@ -71,14 +71,10 @@ export type PurchaseOrder = {
   deliveryAddress: string;
   freightCharges: number;
   notes: string;
-  linkedQuote: string;
+  linkedOrder: string;
   items: POLine[];
   receipts: Receipt[];
   approvedBy?: string;
-  approvalComment?: string;
-  rejectedBy?: string;
-  vendorBill?: string;
-  billPaid?: PaymentRecord;
   sentAt?: string;
   activities: POActivity[];
 };
@@ -123,6 +119,167 @@ export function receiveAgainstOrder(current: Store, orderId: string, receipt: Re
   return { orders: current.orders.map((entry) => entry.id === orderId ? nextOrder : entry), ...stockPatch };
 }
 
+// Customer orders. Created when a quotation is accepted — the record of what the customer
+// confirmed, holding their PO details and an optional advance, ahead of dispatch/jobs/invoicing.
+// Named CustomerOrder (not Order) since PurchaseOrder already uses "order" for the vendor side.
+export type CustomerOrderType = "Sale" | "Service" | "Rental";
+export type CustomerOrderStatus = "Open" | "Fulfilled" | "Cancelled";
+export type CustomerOrderActivity = { title: string; meta: string; tone?: "system" | "paid" };
+export type CustomerOrder = {
+  id: string;
+  number: string;
+  customer: string;
+  contact: string;
+  customerGstin: string;
+  customerState: string;
+  billingAddress: string;
+  shippingAddress: string;
+  fromQuote: string;
+  orderDate: string;
+  orderType: CustomerOrderType;
+  poNumber?: string;
+  poDate?: string;
+  poAttachment?: string;
+  advanceAmount?: number;
+  installationNeeded?: boolean;
+  dispatchedAt?: string;
+  items: QuoteLine[];
+  status: CustomerOrderStatus;
+  activities: CustomerOrderActivity[];
+};
+
+// Delivery Challans. Any stock that physically leaves the office for a customer — a sale,
+// a rental or demo dispatch, or returning a customer's own instrument after it was in our
+// lab — gets one of these so there is always a document covering the movement.
+export type DCReason = "Sale" | "Rental" | "Demo" | "Return";
+export type DCLine = { description: string; serial?: string; quantity: number };
+export type DeliveryChallan = {
+  id: string; number: string; date: string;
+  customer: string; siteId?: string;
+  reason: DCReason;
+  reference?: string;
+  lines: DCLine[];
+};
+export function nextDcNumber(challans: DeliveryChallan[]) {
+  const highest = Math.max(0, ...challans.map((entry) => Number(entry.number.split("-").at(-1)) || 0));
+  return `DC-${String(highest + 1).padStart(4, "0")}`;
+}
+export function addDeliveryChallan(current: Store, input: { customer: string; siteId?: string; reason: DCReason; reference?: string; lines: DCLine[]; date?: string }): Partial<Store> {
+  const dc: DeliveryChallan = { id: `dc-${Date.now()}`, number: nextDcNumber(current.deliveryChallans), date: input.date || dateIso(), customer: input.customer, siteId: input.siteId, reason: input.reason, reference: input.reference, lines: input.lines };
+  return { deliveryChallans: [dc, ...current.deliveryChallans] };
+}
+
+/** Dispatching a Sale order issues each in-stock line from the store (selling equipment units
+ *  one by one, decrementing spare balances) and raises one Delivery Challan covering everything
+ *  that actually moved. Lines with nothing in stock are simply left out — this only ever moves
+ *  real stock, never invents it. Equipment sold this way carries saleRef === order.number, so it
+ *  shows up under the order's existing "Dispatches" section for free. */
+export function dispatchSaleOrder(current: Store, order: CustomerOrder, siteId: string, date: string): Partial<Store> {
+  let individuals = current.individuals;
+  let quantities = current.quantities;
+  let instruments = current.instruments;
+  const moves: StockMove[] = [];
+  const dcLines: DCLine[] = [];
+  const today = prettyDate(date);
+
+  order.items.filter((line) => line.inStock).forEach((line) => {
+    let remaining = line.quantity;
+    while (remaining > 0) {
+      const unit = individuals.find((entry) => entry.name === line.item && entry.holder === "Store" && entry.opStatus === "Available");
+      if (!unit) break;
+      const patch = recordEquipmentSale({ ...current, individuals, instruments }, unit.id, { customer: order.customer, siteId, saleRef: order.number });
+      individuals = patch.individuals ?? individuals;
+      instruments = patch.instruments ?? instruments;
+      moves.push({ id: `mv-${Date.now()}-${unit.id}`, date, at: `${today} · now`, action: "Record Sale", source: unit.currentWith, destination: order.customer, equipmentId: unit.id, who: APPROVER, document: order.number, item: unit.name });
+      dcLines.push({ description: unit.name, serial: unit.serial, quantity: 1 });
+      remaining -= 1;
+    }
+    if (remaining > 0) {
+      const qtyItem = quantities.find((entry) => entry.name === line.item);
+      const storeLoc = qtyItem?.balances.find((entry) => STOCK_LOCATIONS.includes(entry.location) && entry.quantity > 0);
+      if (qtyItem && storeLoc) {
+        const take = Math.min(remaining, storeLoc.quantity);
+        quantities = quantities.map((entry) => entry.id === qtyItem.id ? { ...entry, balances: adjustBalance(entry.balances, storeLoc.location, -take) } : entry);
+        moves.push({ id: `mv-${Date.now()}-${qtyItem.id}`, date, at: `${today} · now`, action: "Record Sale", source: storeLoc.location, destination: order.customer, quantity: take, who: APPROVER, document: order.number, item: qtyItem.name });
+        dcLines.push({ description: qtyItem.name, quantity: take });
+      }
+    }
+  });
+
+  if (!dcLines.length) return {};
+  const dcPatch = addDeliveryChallan({ ...current, individuals, quantities, instruments }, { customer: order.customer, siteId, reason: "Sale", reference: order.number, date, lines: dcLines });
+  return {
+    individuals, quantities, instruments, moves: [...moves, ...current.moves], ...dcPatch,
+    customerOrders: current.customerOrders.map((entry) => entry.id === order.id ? { ...entry, dispatchedAt: date, activities: [{ title: `Dispatched · ${dcPatch.deliveryChallans![0].number}`, meta: stamp(), tone: "system" as const }, ...entry.activities] } : entry),
+  };
+}
+
+// Rentals — the single place equipment goes out on rent and comes back. A Rental is its own
+// record (not just fields on Individual) because it carries a billing agreement — start date,
+// monthly rate, and how far it has been invoiced — that outlives any one stock movement.
+export type RentalStatus = "Active" | "Returned";
+export type RentalActivity = { title: string; meta: string; tone?: "system" };
+export type Rental = {
+  id: string; number: string;
+  orderRef: string;
+  equipmentId: string;
+  customer: string; siteId: string;
+  startDate: string;
+  monthlyRate: number;
+  expectedReturnDate: string;
+  status: RentalStatus;
+  lastInvoicedThrough?: string; // ISO date up to which rent has been invoiced; next invoice due here
+  returnedAt?: string;
+  returnCondition?: string;
+  activities: RentalActivity[];
+};
+export function nextRentalNumber(rentals: Rental[]) {
+  const highest = Math.max(0, ...rentals.map((entry) => Number(entry.number.split("-").at(-1)) || 0));
+  return `RENT-2026-${String(highest + 1).padStart(4, "0")}`;
+}
+export function rentalOverdue(rental: Rental, today: string) { return rental.status === "Active" && rental.expectedReturnDate < today; }
+export function rentalNextInvoiceDate(rental: Rental) { return rental.lastInvoicedThrough ?? rental.startDate; }
+export function rentalInvoiceDue(rental: Rental, today: string) { return rental.status === "Active" && rentalNextInvoiceDate(rental) <= today; }
+
+/** Issues one or more available units against a Rental order: marks each Store/Available unit
+ *  out to the customer, opens a Rental record per unit (its own monthly rate), and raises one
+ *  Delivery Challan covering the whole batch — the same "leaves the office" rule as a sale. */
+export function issueRental(current: Store, order: CustomerOrder, siteId: string, startDate: string, expectedReturnDate: string, units: { equipmentId: string; monthlyRate: number }[]): Partial<Store> {
+  let individuals = current.individuals;
+  const newRentals: Rental[] = [];
+  const dcLines: DCLine[] = [];
+  const moves: StockMove[] = [];
+  const site = customerSites.find((entry) => entry.id === siteId);
+  const currentWith = `${order.customer} · ${site?.name ?? ""}`;
+  const today = prettyDate(startDate);
+  units.forEach(({ equipmentId, monthlyRate }) => {
+    const unit = individuals.find((entry) => entry.id === equipmentId);
+    if (!unit || unit.holder !== "Store" || unit.opStatus !== "Available" || !(monthlyRate > 0)) return;
+    const number = nextRentalNumber([...current.rentals, ...newRentals]);
+    individuals = individuals.map((row) => row.id === equipmentId ? { ...row, holder: "Customer" as const, currentWith, opStatus: "In use" as const, rentalCustomer: order.customer, rentalSiteId: siteId, rentalReturnDue: expectedReturnDate, rentalRef: number, last: today } : row);
+    newRentals.push({ id: number, number, orderRef: order.number, equipmentId, customer: order.customer, siteId, startDate, monthlyRate, expectedReturnDate, status: "Active", activities: [{ title: `Issued to ${order.customer}`, meta: stamp(), tone: "system" }] });
+    moves.push({ id: `mv-${Date.now()}-${equipmentId}`, date: startDate, at: `${today} · now`, action: "Issue on Rent", source: unit.currentWith, destination: currentWith, equipmentId, who: APPROVER, document: number, item: unit.name });
+    dcLines.push({ description: unit.name, serial: unit.serial, quantity: 1 });
+  });
+  if (!newRentals.length) return {};
+  const dcPatch = addDeliveryChallan({ ...current, individuals }, { customer: order.customer, siteId, reason: "Rental", reference: order.number, date: startDate, lines: dcLines });
+  return { individuals, rentals: [...newRentals, ...current.rentals], moves: [...moves, ...current.moves], ...dcPatch };
+}
+/** Return: check the condition and bring the unit back to stock. No DC — nothing leaves the
+ *  office on a return, so it isn't a delivery. */
+export function returnRental(current: Store, rentalId: string, condition: "Good" | "Damaged", remarks: string, date: string, destination: string): Partial<Store> {
+  const rental = current.rentals.find((entry) => entry.id === rentalId);
+  if (!rental || rental.status !== "Active") return {};
+  const unit = current.individuals.find((entry) => entry.id === rental.equipmentId);
+  if (!unit) return {};
+  const opStatus: EquipmentOpStatus = condition === "Damaged" ? "Damaged" : "Available";
+  const today = prettyDate(date);
+  const individuals = current.individuals.map((row) => row.id === rental.equipmentId ? { ...row, holder: "Store" as const, currentWith: destination, opStatus, condition: remarks || condition, rentalCustomer: undefined, rentalSiteId: undefined, rentalReturnDue: undefined, last: today } : row);
+  const rentals = current.rentals.map((entry) => entry.id !== rentalId ? entry : { ...entry, status: "Returned" as const, returnedAt: date, returnCondition: remarks || condition, activities: [{ title: `Returned — condition: ${remarks || condition}`, meta: stamp(), tone: "system" as const }, ...entry.activities] });
+  const moves = [{ id: `mv-${Date.now()}`, date, at: `${today} · now`, action: "Rental return", source: unit.currentWith, destination, equipmentId: unit.id, who: APPROVER, document: rental.number, reason: condition, item: unit.name }, ...current.moves];
+  return { individuals, rentals, moves };
+}
+
 // Invoices. Due Dates reads the unpaid ones, so they live here rather than in the module.
 // Document Status (Draft/Sent/Cancelled) and Payment Status (Unpaid/Partly Paid/Paid) are
 // deliberately separate axes — see Accounts §7. "Sent" is displayed as "Issued" wherever the
@@ -158,6 +315,7 @@ export type Invoice = {
   overallDiscount: number;
   items: InvoiceLine[];
   fromQuote?: string;
+  orderRef?: string;
   sentAt?: string;
   lastReminder?: string;
   activities: InvoiceActivity[];
@@ -167,42 +325,29 @@ export type Invoice = {
 // A receipt is money actually received from a customer, optionally split across several of
 // their invoices in one go; whatever isn't allocated stays visible as that customer's advance
 // until someone explicitly applies it. TDS the customer deducted is tracked as a separate
-// ledger — it reduces the invoice balance but is never counted as cash collected.
-export type ReceiptClearance = "Cleared" | "Pending Clearance";
-export type LedgerStatus = "Posted" | "Reversed";
+// ledger — it reduces the invoice balance but is never counted as cash collected. Recorded
+// directly, once — no clearance or verification step, and nothing here is ever reversed.
 export type ReceiptAllocation = { invoiceId: string; amount: number };
 export type CustomerReceipt = {
   id: string; customer: string; date: string; amount: number; mode: PaymentMode;
-  reference?: string; notes?: string; clearance: ReceiptClearance;
+  reference?: string; notes?: string; orderRef?: string;
   allocations: ReceiptAllocation[];
   recordedBy: string; recordedAt: string;
-  status: LedgerStatus; reversedReason?: string; reversedBy?: string; reversedAt?: string;
 };
-export type TdsVerification = "Pending" | "Verified";
 export type CustomerTds = {
   id: string; invoiceId: string; customer: string; amount: number; date: string;
-  reference?: string; attachment?: string; verification: TdsVerification;
+  reference?: string; attachment?: string;
   recordedBy: string; recordedAt: string;
-  status: LedgerStatus; reversedReason?: string; reversedBy?: string; reversedAt?: string;
 };
 
-/** Cleared, non-reversed allocations against one invoice — the only receipts that count toward
- *  settlement. A cheque still Pending Clearance is tracked (so it can't be double-allocated)
- *  but does not yet reduce the balance. */
+/** Every allocation ever made against an invoice — the only receipts that count toward
+ *  settlement, since every receipt counts the moment it is recorded. */
 export function invoiceReceiptsApplied(invoiceId: string, receipts: CustomerReceipt[]) {
-  return receipts.filter((receipt) => receipt.status === "Posted" && receipt.clearance === "Cleared")
-    .flatMap((receipt) => receipt.allocations.filter((allocation) => allocation.invoiceId === invoiceId))
+  return receipts.flatMap((receipt) => receipt.allocations.filter((allocation) => allocation.invoiceId === invoiceId))
     .reduce((sum, allocation) => sum + allocation.amount, 0);
 }
 export function invoiceTdsRecorded(invoiceId: string, tds: CustomerTds[]) {
-  return tds.filter((entry) => entry.invoiceId === invoiceId && entry.status === "Posted").reduce((sum, entry) => sum + entry.amount, 0);
-}
-/** Every allocation ever made against an invoice, cleared or not — used only to stop a receipt
- *  from over-allocating a balance that a pending cheque has already claimed part of. */
-export function invoiceCommitted(invoiceId: string, receipts: CustomerReceipt[]) {
-  return receipts.filter((receipt) => receipt.status === "Posted")
-    .flatMap((receipt) => receipt.allocations.filter((allocation) => allocation.invoiceId === invoiceId))
-    .reduce((sum, allocation) => sum + allocation.amount, 0);
+  return tds.filter((entry) => entry.invoiceId === invoiceId).reduce((sum, entry) => sum + entry.amount, 0);
 }
 export function paidSoFar(invoice: Invoice, receipts: CustomerReceipt[]) { return invoiceReceiptsApplied(invoice.id, receipts); }
 export function invoiceTotals(invoice: Invoice) { return totalsFor(invoice.items, invoice.customerState === COMPANY.state, invoice.overallDiscount, invoice.freightCharges); }
@@ -218,48 +363,35 @@ export function invoiceStatusFor(invoice: Invoice, receipts: CustomerReceipt[], 
   if (invoice.status === "Sent" && invoicePaymentStatus(invoice, receipts, tds) !== "Paid" && dayDifference(invoice.dueDate) < 0) return "Overdue";
   return invoice.status;
 }
-/** Unallocated money from a customer's cleared receipts — kept separate until someone applies
- *  it to an invoice by hand; never used silently to mark something paid. */
-export function customerAdvance(customer: string, receipts: CustomerReceipt[]) {
-  return receipts.filter((receipt) => receipt.customer === customer && receipt.status === "Posted" && receipt.clearance === "Cleared")
-    .reduce((sum, receipt) => sum + (receipt.amount - receipt.allocations.reduce((total, allocation) => total + allocation.amount, 0)), 0);
+/** Total owed by a customer — the balance of every issued (Sent) invoice, same basis as the
+ *  Customer Outstanding report. Draft and Cancelled invoices don't count. */
+export function customerOutstanding(customer: string, invoices: Invoice[], receipts: CustomerReceipt[], tds: CustomerTds[]) {
+  return invoices.filter((invoice) => invoice.customer === customer && invoice.status === "Sent").reduce((sum, invoice) => sum + balanceOf(invoice, receipts, tds), 0);
 }
-export function customerPendingClearance(customer: string, receipts: CustomerReceipt[]) {
-  return receipts.filter((receipt) => receipt.customer === customer && receipt.status === "Posted" && receipt.clearance === "Pending Clearance").reduce((sum, receipt) => sum + receipt.amount, 0);
+/** Unallocated money from a customer's receipts — kept separate until someone applies it to an
+ *  invoice by hand; never used silently to mark something paid. */
+export function customerAdvance(customer: string, receipts: CustomerReceipt[]) {
+  return receipts.filter((receipt) => receipt.customer === customer)
+    .reduce((sum, receipt) => sum + (receipt.amount - receipt.allocations.reduce((total, allocation) => total + allocation.amount, 0)), 0);
 }
 /** Same invoice, same TDS amount recorded again — a real (if unusual) coincidence can happen on
  *  a further partial payment, so this is a review warning, never an automatic block. */
 export function duplicateCustomerTds(tds: CustomerTds[], invoiceId: string, amount: number, excludeId?: string) {
-  return tds.filter((entry) => entry.id !== excludeId && entry.invoiceId === invoiceId && entry.amount === amount && entry.status === "Posted");
+  return tds.filter((entry) => entry.id !== excludeId && entry.invoiceId === invoiceId && entry.amount === amount);
 }
 export function duplicateReceiptReference(receipts: CustomerReceipt[], reference: string, excludeId?: string) {
   if (!reference.trim()) return [];
-  return receipts.filter((receipt) => receipt.id !== excludeId && receipt.status !== "Reversed" && receipt.reference?.trim().toLowerCase() === reference.trim().toLowerCase());
+  return receipts.filter((receipt) => receipt.id !== excludeId && receipt.reference?.trim().toLowerCase() === reference.trim().toLowerCase());
 }
 
 export function recordCustomerReceipt(current: Store, receipt: CustomerReceipt): Partial<Store> {
   return { customerReceipts: [receipt, ...current.customerReceipts] };
 }
-export function recordCustomerTds(current: Store, entry: CustomerTds): Partial<Store> {
-  return { customerTds: [entry, ...current.customerTds] };
-}
-export function clearCustomerReceipt(current: Store, receiptId: string): Partial<Store> {
-  return { customerReceipts: current.customerReceipts.map((receipt) => receipt.id === receiptId ? { ...receipt, clearance: "Cleared" as const } : receipt) };
-}
-export function reverseCustomerReceipt(current: Store, receiptId: string, reviewer: string, reason: string): Partial<Store> {
-  return { customerReceipts: current.customerReceipts.map((receipt) => receipt.id !== receiptId || receipt.status === "Reversed" ? receipt : { ...receipt, status: "Reversed" as const, reversedReason: reason, reversedBy: reviewer, reversedAt: stamp() }) };
-}
-export function verifyCustomerTds(current: Store, tdsId: string): Partial<Store> {
-  return { customerTds: current.customerTds.map((entry) => entry.id === tdsId ? { ...entry, verification: "Verified" as const } : entry) };
-}
-export function reverseCustomerTds(current: Store, tdsId: string, reviewer: string, reason: string): Partial<Store> {
-  return { customerTds: current.customerTds.map((entry) => entry.id !== tdsId || entry.status === "Reversed" ? entry : { ...entry, status: "Reversed" as const, reversedReason: reason, reversedBy: reviewer, reversedAt: stamp() }) };
-}
 
 export const seedInvoices: Invoice[] = [
   { id: "INV-2026-0118", number: "INV-2026-0118", customer: "Nova Instruments", contact: "Rhea Mehta", customerGstin: "29AABCN4106D1Z7", customerState: "Karnataka", billingAddress: "12, HAL 2nd Stage, Indiranagar, Bengaluru, Karnataka 560038", shippingAddress: "Materials Lab, Nova Instruments, Bengaluru, Karnataka 560038", paymentTerms: "Net 30", invoiceDate: "2026-08-20", dueDate: "2026-09-19", status: "Sent", invoiceType: "Sales", poNumber: "NI/PO/2026/318", poDate: "2026-08-18", deliveryNote: "DN-4471", vehicleNumber: "KA 01 AB 4471", placeOfSupply: "Karnataka", irn: "", ewayBill: "", freightCharges: 0, overallDiscount: 0, items: [{ id: "i118-1", item: "Optical Microscope MX-5", description: "Optical microscope with 5 MP imaging", hsn: "9011", quantity: 1, rate: 215000, gst: 18, stockCode: "INS-0042" }], sentAt: "20 Aug 2026", activities: [{ title: "Invoice sent to Rhea Mehta", meta: "20 Aug 2026 · Arun Kumar", tone: "sent" }] },
   { id: "INV-2026-0117", number: "INV-2026-0117", customer: "Arka Diagnostics", contact: "Meera Nair", customerGstin: "29AAECA5512M1Z3", customerState: "Karnataka", billingAddress: "44, Peenya Industrial Area, Bengaluru, Karnataka 560058", shippingAddress: "44, Peenya Industrial Area, Bengaluru, Karnataka 560058", paymentTerms: "Net 30", invoiceDate: "2026-08-05", dueDate: "2026-09-04", status: "Sent", invoiceType: "Sales", poNumber: "ARK/PO/2026/061", poDate: "2026-08-02", deliveryNote: "", vehicleNumber: "", placeOfSupply: "Karnataka", irn: "", ewayBill: "", freightCharges: 0, overallDiscount: 0, items: [{ id: "i117-1", item: "AFM probe tips — 10 pack", description: "Consumable AFM probe tips, pack of 10", hsn: "9012", quantity: 4, rate: 18500, gst: 18, stockCode: "INS-0118" }], sentAt: "05 Aug 2026", activities: [{ title: "Invoice sent to Meera Nair", meta: "05 Aug 2026 · Priya Shah", tone: "sent" }] },
-  { id: "INV-2026-0116", number: "INV-2026-0116", customer: "Tera Research", contact: "Sana Iyer", customerGstin: "33AABCT6281H1ZA", customerState: "Tamil Nadu", billingAddress: "21, OMR Road, Thoraipakkam, Chennai, Tamil Nadu 600097", shippingAddress: "Surface Science Lab, OMR Road, Chennai, Tamil Nadu 600097", paymentTerms: "Net 30", invoiceDate: "2026-09-10", dueDate: "2026-10-10", status: "Sent", invoiceType: "Sales", poNumber: "TR/PO/2026/119", poDate: "2026-09-10", deliveryNote: "DN-4460", vehicleNumber: "", placeOfSupply: "Tamil Nadu", irn: "", ewayBill: "", freightCharges: 0, overallDiscount: 0, items: [{ id: "i116-1", item: "Surface Profilometer", description: "Surface profilometer, standard measurement package", hsn: "9027", quantity: 1, rate: 1090000, gst: 18 }, { id: "i116-2", item: "On-site commissioning", description: "Installation and commissioning", hsn: "9987", quantity: 1, rate: 130000, gst: 18 }], sentAt: "10 Sep 2026", fromQuote: "QT-2026-0827 R1", activities: [{ title: "Part payment received ₹7,00,000", meta: "12 Sep 2026 · Arun Kumar", tone: "paid" }, { title: "Invoice sent to Sana Iyer", meta: "10 Sep 2026 · Priya Shah", tone: "sent" }] },
+  { id: "INV-2026-0116", number: "INV-2026-0116", customer: "Tera Research", contact: "Sana Iyer", customerGstin: "33AABCT6281H1ZA", customerState: "Tamil Nadu", billingAddress: "21, OMR Road, Thoraipakkam, Chennai, Tamil Nadu 600097", shippingAddress: "Surface Science Lab, OMR Road, Chennai, Tamil Nadu 600097", paymentTerms: "Net 30", invoiceDate: "2026-09-10", dueDate: "2026-10-10", status: "Sent", invoiceType: "Sales", poNumber: "TR/PO/2026/119", poDate: "2026-09-10", deliveryNote: "DN-4460", vehicleNumber: "", placeOfSupply: "Tamil Nadu", irn: "", ewayBill: "", freightCharges: 0, overallDiscount: 0, items: [{ id: "i116-1", item: "Surface Profilometer", description: "Surface profilometer, standard measurement package", hsn: "9027", quantity: 1, rate: 1090000, gst: 18 }, { id: "i116-2", item: "On-site commissioning", description: "Installation and commissioning", hsn: "9987", quantity: 1, rate: 130000, gst: 18 }], sentAt: "10 Sep 2026", fromQuote: "QT-2026-0827 R1", orderRef: "ORD-2026-0500", activities: [{ title: "Part payment received ₹7,00,000", meta: "12 Sep 2026 · Arun Kumar", tone: "paid" }, { title: "Invoice sent to Sana Iyer", meta: "10 Sep 2026 · Priya Shah", tone: "sent" }] },
   { id: "INV-2026-0115", number: "INV-2026-0115", customer: "Helix Labs", contact: "Kiran Rao", customerGstin: "36AABCH2119P1Z5", customerState: "Telangana", billingAddress: "Plot 7, Genome Valley, Hyderabad, Telangana 500078", shippingAddress: "Plot 7, Genome Valley, Hyderabad, Telangana 500078", paymentTerms: "Net 15", invoiceDate: "2026-08-28", dueDate: "2026-09-12", status: "Sent", invoiceType: "Service", poNumber: "HL/PO/2026/443", poDate: "2026-08-26", deliveryNote: "", vehicleNumber: "", placeOfSupply: "Telangana", irn: "", ewayBill: "", freightCharges: 0, overallDiscount: 0, items: [{ id: "i115-1", item: "Annual maintenance contract", description: "AMC for optical microscopy bench, 12 months", hsn: "9987", quantity: 1, rate: 145000, gst: 18 }], sentAt: "28 Aug 2026", activities: [{ title: "Payment received in full", meta: "09 Sep 2026 · Arun Kumar", tone: "paid" }, { title: "Invoice sent to Kiran Rao", meta: "28 Aug 2026 · Arun Kumar", tone: "sent" }] },
   { id: "INV-2026-0114", number: "INV-2026-0114", customer: "Vector Bio Labs", contact: "Nikhil Arora", customerGstin: "27AABCV8041G1ZQ", customerState: "Maharashtra", billingAddress: "88, MIDC Andheri East, Mumbai, Maharashtra 400093", shippingAddress: "88, MIDC Andheri East, Mumbai, Maharashtra 400093", paymentTerms: "Net 45", invoiceDate: "2026-09-15", dueDate: "2026-10-30", status: "Draft", invoiceType: "Sales", poNumber: "", poDate: "", deliveryNote: "", vehicleNumber: "", placeOfSupply: "Maharashtra", irn: "", ewayBill: "", freightCharges: 0, overallDiscount: 0, items: [{ id: "i114-1", item: "Digital temperature controller", description: "PID digital temperature controller", hsn: "9032", quantity: 2, rate: 128500, gst: 18 }], activities: [{ title: "Draft created", meta: "15 Sep 2026 · Priya Shah", tone: "system" }] },
   { id: "INV-2026-0113", number: "INV-2026-0113", customer: "Helix Labs", contact: "Kiran Rao", customerGstin: "36AABCH2119P1Z5", customerState: "Telangana", billingAddress: "Plot 7, Genome Valley, Hyderabad, Telangana 500078", shippingAddress: "Plot 7, Genome Valley, Hyderabad, Telangana 500078", paymentTerms: "Net 15", invoiceDate: "2026-08-20", dueDate: "2026-09-04", status: "Cancelled", invoiceType: "Sales", poNumber: "", poDate: "", deliveryNote: "", vehicleNumber: "", placeOfSupply: "Telangana", irn: "", ewayBill: "", freightCharges: 0, overallDiscount: 0, items: [{ id: "i113-1", item: "Vacuum seal kit", description: "Vacuum seal maintenance kit", hsn: "8484", quantity: 3, rate: 12400, gst: 18 }], sentAt: "20 Aug 2026", activities: [{ title: "Invoice cancelled — duplicate of INV-2026-0112", meta: "22 Aug 2026 · Arun Kumar", tone: "system" }] },
@@ -364,9 +496,8 @@ export type CompanyBill = { id: string; name: string; vendor: string; amount: nu
 
 // ─── Accounts: Bills & Expenses (supplier bills, company bills and their payments) ─────
 // One ledger for both a supplier's invoice and a recurring company bill — they differ only by
-// category. A Purchase Order never creates a Payable by itself (see PurchaseOrder.vendorBill,
-// which is a separate, older mechanism); a Payable is only ever created explicitly, optionally
-// citing a PO for reference.
+// category. A received Purchase Order's vendor bill is created here too, citing the PO for
+// reference (poRef) and carrying the vendor's TDS rate/section so it can be deducted at payment.
 export type PayableCategory = "Supplier Purchase" | "Rent" | "Electricity" | "Internet / Phone" | "Office Expense" | "Other";
 export const PAYABLE_CATEGORIES: PayableCategory[] = ["Supplier Purchase", "Rent", "Electricity", "Internet / Phone", "Office Expense", "Other"];
 export type PayablePaymentStatus = "Unpaid" | "Partly Paid" | "Paid";
@@ -374,21 +505,20 @@ export type Payable = {
   id: string; number?: string; payee: string; category: PayableCategory;
   billDate: string; dueDate: string; amount: number; description: string;
   attachment?: string; poRef?: string; recurringLabel?: string; clonedFrom?: string;
+  tdsRate?: number; tdsSection?: string;
   createdBy: string; createdAt: string;
-  status: LedgerStatus; reversedReason?: string; reversedBy?: string; reversedAt?: string;
 };
 export type SupplierPayment = {
   id: string; billId: string; date: string; amount: number; mode: PaymentMode;
   reference?: string; notes?: string; tds?: number;
   recordedBy: string; recordedAt: string;
-  status: LedgerStatus; reversedReason?: string; reversedBy?: string; reversedAt?: string;
 };
 
 export function payableAppliedPayments(billId: string, payments: SupplierPayment[]) {
-  return payments.filter((payment) => payment.billId === billId && payment.status === "Posted").reduce((sum, payment) => sum + payment.amount, 0);
+  return payments.filter((payment) => payment.billId === billId).reduce((sum, payment) => sum + payment.amount, 0);
 }
 export function payableTdsRecorded(billId: string, payments: SupplierPayment[]) {
-  return payments.filter((payment) => payment.billId === billId && payment.status === "Posted").reduce((sum, payment) => sum + (payment.tds ?? 0), 0);
+  return payments.filter((payment) => payment.billId === billId).reduce((sum, payment) => sum + (payment.tds ?? 0), 0);
 }
 export function payableBalance(bill: Payable, payments: SupplierPayment[]) {
   return Math.max(bill.amount - payableAppliedPayments(bill.id, payments) - payableTdsRecorded(bill.id, payments), 0);
@@ -402,23 +532,17 @@ export function payablePaymentStatus(bill: Payable, payments: SupplierPayment[])
  *  bill twice is the most common way a payable gets duplicated. Never an automatic block. */
 export function duplicateBillNumber(bills: Payable[], payee: string, number: string, excludeId?: string) {
   if (!number.trim()) return [];
-  return bills.filter((bill) => bill.id !== excludeId && bill.status !== "Reversed" && bill.payee === payee && (bill.number ?? "").trim().toLowerCase() === number.trim().toLowerCase());
+  return bills.filter((bill) => bill.id !== excludeId && bill.payee === payee && (bill.number ?? "").trim().toLowerCase() === number.trim().toLowerCase());
 }
 export function duplicatePaymentReference(payments: SupplierPayment[], reference: string, excludeId?: string) {
   if (!reference.trim()) return [];
-  return payments.filter((payment) => payment.id !== excludeId && payment.status !== "Reversed" && payment.reference?.trim().toLowerCase() === reference.trim().toLowerCase());
+  return payments.filter((payment) => payment.id !== excludeId && payment.reference?.trim().toLowerCase() === reference.trim().toLowerCase());
 }
 export function addPayable(current: Store, bill: Payable, payment?: SupplierPayment): Partial<Store> {
   return { payables: [bill, ...current.payables], supplierPayments: payment ? [payment, ...current.supplierPayments] : current.supplierPayments };
 }
 export function recordSupplierPayment(current: Store, payment: SupplierPayment): Partial<Store> {
   return { supplierPayments: [payment, ...current.supplierPayments] };
-}
-export function reverseBill(current: Store, billId: string, reviewer: string, reason: string): Partial<Store> {
-  return { payables: current.payables.map((bill) => bill.id !== billId || bill.status === "Reversed" ? bill : { ...bill, status: "Reversed" as const, reversedReason: reason, reversedBy: reviewer, reversedAt: stamp() }) };
-}
-export function reverseSupplierPayment(current: Store, paymentId: string, reviewer: string, reason: string): Partial<Store> {
-  return { supplierPayments: current.supplierPayments.map((payment) => payment.id !== paymentId || payment.status === "Reversed" ? payment : { ...payment, status: "Reversed" as const, reversedReason: reason, reversedBy: reviewer, reversedAt: stamp() }) };
 }
 
 
@@ -518,31 +642,21 @@ export function groupInstrumentsBySite(instruments: CustomerInstrument[]) {
   return [...groups.values()];
 }
 
-export type JobType = "Calibration" | "Service" | "Repair" | "Installation" | "Rental delivery" | "Rental pickup";
+export type JobType = "Calibration" | "Repair" | "Validation/Testing" | "Install";
 // Billing ("Invoiced") is tracked separately via `invoiceNumber` — a Completed job stays
 // Completed whether or not it has been invoiced yet. See invoiceStatusOf() below.
 export type JobStatus = "Unassigned" | "Scheduled" | "In progress" | "On hold" | "Completed" | "Cancelled";
-export type JobPriority = "Low" | "Normal" | "High" | "Urgent";
-export type JobSlot = "Morning" | "Afternoon" | "Full day";
-export type JobResult = { instrumentId: string; asFound: string; asLeft: string; outcome: "Pass" | "Fail" | "Pass after adjustment"; readings: string; remarks: string; certificate?: string };
+export type JobResult = { instrumentId: string; asFound: string; asLeft: string; outcome: "Pass" | "Fail" | "Pass after adjustment"; readings: string; remarks: string };
 export type JobActivity = { title: string; meta: string; tone?: "system" | "assigned" | "done" };
 
-// Location check on a mobile site event. Low-accuracy or missing coordinates never present as
+// Location check on a site check-in/out. Low-accuracy or missing coordinates never present as
 // verified attendance — they land in "Location unavailable" or "Needs review" instead.
 export type LocationCheck = "Within site area" | "Outside site area" | "Location unavailable" | "Needs review";
 export type GeoPoint = { lat: number; lng: number; accuracyM: number };
-/** A single check-in or check-out captured on a visit — event-based, not continuous tracking. */
+/** A single check-in or check-out on a job's one visit — event-based, not continuous tracking. */
 export type VisitStamp = { at: string; syncedAt: string; source: "Mobile" | "Manual correction"; location?: GeoPoint; siteDistanceM?: number; locationCheck: LocationCheck };
 export type VisitStatus = "Scheduled" | "Check-in not received" | "On site" | "Checked out" | "Cancelled";
 export type VisitOutcome = "Work completed" | "Partially completed" | "Customer unavailable" | "Follow-up required";
-/** An extra trip beyond a job's primary (engineer/scheduledDate) visit — "Add visit". Status is
- *  never stored: it is always derived (see computeVisitStatus) from check-in/out and the clock,
- *  so it can never go stale. */
-export type JobVisit = {
-  id: string; engineer: string; plannedDate: string; plannedStart: string; plannedEnd: string;
-  cancelled?: boolean; checkIn?: VisitStamp; checkOut?: VisitStamp;
-  outcome?: VisitOutcome; outcomeNote?: string; remainingWork?: string;
-};
 
 export type Job = {
   id: string;
@@ -553,12 +667,11 @@ export type Job = {
   instrumentIds: string[];
   stockIds: string[];
   description: string;
-  doneAt: "Customer site" | "Our lab";
+  doneAt: "In-lab" | "Site visit";
   scheduledDate: string;
   requiredDate?: string;
-  slot: JobSlot;
-  hours: number;
-  priority?: JobPriority;
+  plannedStart?: string; // "HH:MM" 24h — the one scheduled time
+  hours: number; // estimated duration, used to derive the end of the visit window
   engineer?: string;
   status: JobStatus;
   expectedSpares: { item: string; quantity: number }[];
@@ -570,37 +683,34 @@ export type Job = {
   startedAt?: string;
   completedAt?: string;
   invoiceNumber?: string;
+  orderRef?: string;
   activities: JobActivity[];
-  // Scheduling and visit-tracking additions. Kept optional/defaulted so existing jobs and
-  // screens that only know engineer/scheduledDate/slot keep working unchanged.
-  plannedStart?: string; // "HH:MM" 24h — falls back to the slot's default window when absent
-  plannedEnd?: string;
-  travelAllowanceHours?: number; // planner-reserved schedule time only, never paid attendance
-  // Primary visit's actual attendance — visit status (Scheduled/On site/...) is always derived
-  // from these plus the clock (see computeVisitStatus), never stored, so it can't go stale.
+  // Actual attendance on the visit — status (Scheduled/On site/...) is always derived from
+  // these plus the clock (see computeVisitStatus), never stored, so it can't go stale.
   checkIn?: VisitStamp;
   checkOut?: VisitStamp;
-  outcome?: VisitOutcome; // primary visit's outcome, independent of job.status
+  outcome?: VisitOutcome;
   outcomeNote?: string;
   remainingWork?: string;
-  additionalEngineers?: string[]; // "Add engineer" — extra assignees beyond the primary
-  additionalVisits?: JobVisit[]; // "Add visit" — extra trips beyond the primary
   onHoldReason?: string;
   cancelReason?: string;
+  // In-lab custody: the instrument is received onto SPM's premises, worked on, then returned
+  // to the customer with a Delivery Challan. Only meaningful when doneAt === "In-lab".
+  receivedAt?: string;
+  receivedCondition?: string;
+  returnedAt?: string;
+  returnDc?: string;
+  // Calibration/Validation completion: reference standards used (blocked if any is out of its
+  // own calibration — see masterExpired) and the certificate that closed the job out.
+  mastersUsed?: string[];
+  certificateNumber?: string;
+  certificateFile?: string;
+  certificateGeneratedAt?: string;
 };
 
-export function visitWindow(job: Pick<Job, "slot" | "plannedStart" | "plannedEnd">) {
-  return { start: job.plannedStart ?? SLOT_TIMES[job.slot].start, end: job.plannedEnd ?? SLOT_TIMES[job.slot].end };
-}
-export const priorityOf = (job: Pick<Job, "priority">): JobPriority => job.priority ?? "Normal";
-/** Jobs an engineer has that day — the number the schedule board colours on. Work that is
- *  already finished still used the day up, so it counts. Cancelled jobs free the day. */
-export function loadFor(jobs: Job[], engineer: string, date: string) {
-  return jobs.filter((job) => job.engineer === engineer && job.scheduledDate === date && job.status !== "Cancelled").length;
-}
-export function loadTone(count: number) {
-  if (count > JOB_SETTINGS.engineerDailyLimit) return "over";
-  return count === JOB_SETTINGS.engineerDailyLimit ? "full" : "ok";
+export function visitWindow(job: Pick<Job, "plannedStart" | "hours">) {
+  const start = job.plannedStart ?? "09:30";
+  return { start, end: minutesToTime(timeToMinutes(start) + Math.max(0, job.hours) * 60) };
 }
 /** A job already covering this instrument, so Due Dates and Customer Instruments can say so
  *  without opening anything, and can offer it instead of creating a duplicate. */
@@ -613,34 +723,39 @@ export function billingStatusOf(job: Job): "Not applicable" | "To invoice" | "In
   if (job.status !== "Completed") return "Not applicable";
   return job.invoiceNumber ? "Invoiced" : "To invoice";
 }
-/** A job is fully resolved (eligible to be marked Completed) only once every visit's outcome
- *  is a resolved one — a pending follow-up or partial visit blocks job completion. */
+/** A job's one visit is resolved (eligible to be marked Completed) once its outcome is a
+ *  resolved one — a pending follow-up or partial visit blocks job completion. */
 export function jobFullyResolved(job: Job) {
-  const outcomes = [job.outcome, ...(job.additionalVisits ?? []).map((visit) => visit.outcome)];
-  return outcomes.length > 0 && outcomes.every((outcome) => outcome === "Work completed" || outcome === "Customer unavailable");
-}
-/** Two time ranges (24h "HH:MM") on the same engineer/day that actually overlap — used to flag
- *  a conflicting assignment instead of just comparing job counts. */
-export function overlapsOn(jobs: Job[], engineer: string, date: string, start: string, end: string, excludeJobId?: string) {
-  const s = timeToMinutes(start); const e = timeToMinutes(end);
-  return jobs.find((job) => job.id !== excludeJobId && job.status !== "Cancelled" && (
-    ((job.engineer === engineer || job.additionalEngineers?.includes(engineer)) && job.scheduledDate === date && s < timeToMinutes(visitWindow(job).end) + (job.travelAllowanceHours ?? 0) * 60 && timeToMinutes(visitWindow(job).start) < e)
-    || job.additionalVisits?.some((visit) => !visit.cancelled && visit.engineer === engineer && visit.plannedDate === date && s < timeToMinutes(visit.plannedEnd) && timeToMinutes(visit.plannedStart) < e)
-  ));
-}
-/** The skill a job type needs, and whether an engineer is known to have it. Where the type has
- *  no mapped skill, or the engineer's list is empty, this deliberately returns "unknown" rather
- *  than inventing a fit — the assignment panel shows "Needs review" in that case. */
-export function skillFitFor(jobType: string, engineerSkills: string[]): "fit" | "gap" | "unknown" {
-  const needed = JOB_TYPE_SKILL[jobType];
-  if (!needed) return "unknown";
-  if (!engineerSkills.length) return "unknown";
-  return engineerSkills.includes(needed) ? "fit" : "gap";
+  return job.outcome === "Work completed" || job.outcome === "Customer unavailable";
 }
 
-// Leave, training blocks and holidays — the read-model the schedule board and Attendance both
-// use to say who is unavailable on a given day. Approving a leave never silently cancels a job;
-// it only flags the jobs it now conflicts with.
+/** In-lab jobs only: the instrument arrives at SPM's premises — recorded with its condition on
+ *  receipt, same as any other custody change (see CustomerInstruments' custody field). */
+export function receiveInLabJob(current: Store, jobId: string, condition: string, date: string): Partial<Store> {
+  const job = current.jobs.find((entry) => entry.id === jobId);
+  if (!job) return {};
+  const log: CustodyEvent = { id: `cl-${Date.now()}`, at: stamp(), action: "Received at SPM lab", location: "SPM Lab Solutions", note: condition };
+  const instruments = current.instruments.map((item) => job.instrumentIds.includes(item.id) ? { ...item, custody: "In our lab" as const, receivedAt: date, condition, custodyLog: [log, ...(item.custodyLog ?? [])] } : item);
+  const jobs = current.jobs.map((entry) => entry.id !== jobId ? entry : { ...entry, receivedAt: date, receivedCondition: condition, activities: [{ title: `Instrument received — condition: ${condition}`, meta: stamp(), tone: "system" as const }, ...entry.activities] });
+  return { instruments, jobs };
+}
+/** In-lab jobs only: hands the instrument back once work is done, creating one Delivery Challan
+ *  for everything on the job — the same document any other stock leaving the office gets. */
+export function returnInLabJob(current: Store, jobId: string, date: string): Partial<Store> {
+  const job = current.jobs.find((entry) => entry.id === jobId);
+  if (!job) return {};
+  const targets = current.instruments.filter((item) => job.instrumentIds.includes(item.id));
+  if (!targets.length) return {};
+  const log: CustodyEvent = { id: `cl-${Date.now()}-r`, at: stamp(), action: "Returned to customer", location: job.customer };
+  const instruments = current.instruments.map((item) => job.instrumentIds.includes(item.id) ? { ...item, custody: "Customer site" as const, receivedAt: undefined, condition: undefined, custodyLog: [log, ...(item.custodyLog ?? [])] } : item);
+  const dcPatch = addDeliveryChallan({ ...current, instruments }, { customer: job.customer, siteId: job.siteId, reason: "Return", reference: job.number, date, lines: targets.map((item) => ({ description: item.name, serial: item.serial, quantity: 1 })) });
+  const jobs = current.jobs.map((entry) => entry.id !== jobId ? entry : { ...entry, returnedAt: date, returnDc: dcPatch.deliveryChallans![0].number, activities: [{ title: `Returned to customer · ${dcPatch.deliveryChallans![0].number}`, meta: stamp(), tone: "system" as const }, ...entry.activities] });
+  return { instruments, ...dcPatch, jobs };
+}
+
+// Leave, training blocks and holidays — the read-model Attendance uses to say who is
+// unavailable on a given day. Approving a leave never silently cancels a job; it only flags
+// the jobs it now conflicts with.
 export type LeaveKind = "Leave" | "Training";
 export type LeaveStatus = "Pending" | "Approved" | "Rejected";
 export type LeaveRequest = {
@@ -666,65 +781,19 @@ export function blockedOn(leaves: LeaveRequest[], holidays: Holiday[], engineer:
  *  warning to resolve by hand, never auto-cancelled. */
 export function affectedJobsForLeave(jobs: Job[], leave: LeaveRequest) {
   const dates = leaveDates(leave);
-  return jobs.filter((job) => job.status !== "Completed" && job.status !== "Cancelled" && (((job.engineer === leave.engineer || job.additionalEngineers?.includes(leave.engineer)) && dates.includes(job.scheduledDate)) || job.additionalVisits?.some((visit) => !visit.cancelled && visit.engineer === leave.engineer && dates.includes(visit.plannedDate))));
+  return jobs.filter((job) => job.status !== "Completed" && job.status !== "Cancelled" && job.engineer === leave.engineer && dates.includes(job.scheduledDate));
 }
 
-// Schedule capacity: the working window minus leave/holiday, existing assignments and their
-// travel allowance. Reported as free minutes AND as the free segments themselves, so a full-day
-// job can be told apart from several small gaps that only add up to the same total.
-export type FreeSegment = { start: string; end: string };
-export type DayCapacity = { totalMinutes: number; bookedMinutes: number; freeMinutes: number; freeSegments: FreeSegment[]; blocked?: BlockedInfo; overlap: boolean };
-export function dayCapacity(jobs: Job[], leaves: LeaveRequest[], holidays: Holiday[], engineer: string, date: string): DayCapacity {
-  const windowStart = timeToMinutes(ATTENDANCE_SETTINGS.workStart);
-  const windowEnd = timeToMinutes(ATTENDANCE_SETTINGS.workEnd);
-  const blocked = blockedOn(leaves, holidays, engineer, date);
-  const busy: { start: number; end: number }[] = [];
-  jobs.filter((job) => job.status !== "Cancelled").forEach((job) => {
-    if ((job.engineer === engineer || job.additionalEngineers?.includes(engineer)) && job.scheduledDate === date) {
-      const window = visitWindow(job);
-      busy.push({ start: timeToMinutes(window.start), end: timeToMinutes(window.end) + (job.travelAllowanceHours ?? 0) * 60 });
-    }
-    (job.additionalVisits ?? []).filter((visit) => !visit.cancelled && visit.engineer === engineer && visit.plannedDate === date).forEach((visit) => busy.push({ start: timeToMinutes(visit.plannedStart), end: timeToMinutes(visit.plannedEnd) }));
-  });
-  const assignments = busy.slice().sort((a, b) => a.start - b.start);
-  const overlap = assignments.some((entry, index) => assignments.slice(0, index).some((previous) => previous.end > entry.start));
-  if (blocked && !blocked.halfDay) return { totalMinutes: 0, bookedMinutes: 0, freeMinutes: 0, freeSegments: [], blocked, overlap: assignments.length > 0 };
-  const availableStart = blocked?.halfDay ? windowStart + (windowEnd - windowStart) / 2 : windowStart;
-  const merged: { start: number; end: number }[] = [];
-  assignments.map((entry) => ({ start: Math.max(availableStart, entry.start), end: Math.min(windowEnd, entry.end) })).filter((entry) => entry.end > entry.start).forEach((entry) => {
-    const last = merged.at(-1); if (last && entry.start <= last.end) last.end = Math.max(last.end, entry.end); else merged.push({ ...entry });
-  });
-  const freeSegments: FreeSegment[] = [];
-  let cursor = availableStart;
-  merged.forEach((entry) => { if (entry.start > cursor) freeSegments.push({ start: minutesToTime(cursor), end: minutesToTime(entry.start) }); cursor = Math.max(cursor, entry.end); });
-  if (cursor < windowEnd) freeSegments.push({ start: minutesToTime(cursor), end: minutesToTime(windowEnd) });
-  const bookedMinutes = merged.reduce((sum, entry) => sum + entry.end - entry.start, 0);
-  return { totalMinutes: windowEnd - availableStart, bookedMinutes, freeMinutes: windowEnd - availableStart - bookedMinutes, freeSegments, blocked, overlap: overlap || Boolean(blocked?.halfDay && assignments.some((entry) => entry.start < availableStart)) };
-}
-export function fitsOneSegment(freeSegments: FreeSegment[], neededHours: number) {
-  const needed = neededHours * 60;
-  return freeSegments.some((segment) => timeToMinutes(segment.end) - timeToMinutes(segment.start) >= needed);
-}
-
-// Attendance: office (biometric), site (mobile) and manual-correction events. A correction is
-// always a new event pointing back at the original via `correctionOf` — the original is kept,
-// marked `supersededBy`, never deleted or edited in place.
+// Attendance: office (biometric) and site (mobile) events.
 export type AttendanceEventKind = "Office check-in" | "Office checkout" | "Site check-in" | "Site checkout";
 export type AttendanceEventSource = "Biometric" | "Mobile" | "Manual correction";
 export type AttendanceEvent = {
   id: string; engineer: string; date: string; kind: AttendanceEventKind; source: AttendanceEventSource;
   at: string; syncedAt: string; jobId?: string; siteId?: string;
   location?: GeoPoint; siteDistanceM?: number; locationCheck?: LocationCheck;
-  sourceEventId?: string; correctionOf?: string; supersededBy?: string;
+  sourceEventId?: string;
 };
-/** Current events only — a superseded original is excluded so it isn't double-counted in
- *  summaries and exceptions. Use allEventsFor to show the full timeline including it. */
 export function eventsFor(events: AttendanceEvent[], engineer: string, date: string) {
-  return events.filter((event) => event.engineer === engineer && event.date === date && !event.supersededBy).sort((a, b) => a.at.localeCompare(b.at));
-}
-/** Every event for the day, including ones a correction has superseded — the original is kept
- *  and stays visible, distinguishably, never hidden or deleted. */
-export function allEventsFor(events: AttendanceEvent[], engineer: string, date: string) {
   return events.filter((event) => event.engineer === engineer && event.date === date).sort((a, b) => a.at.localeCompare(b.at));
 }
 export type AttendanceStatus = "Present" | "On leave" | "Training" | "Holiday" | "Weekly off" | "Upcoming" | "No activity recorded";
@@ -762,18 +831,14 @@ export function demoLocationStamp(preset: "within" | "outside" | "unavailable", 
   const siteDistanceM = metersBetween(location, { lat: site.lat, lng: site.lng });
   return { at, syncedAt, source, location, siteDistanceM, locationCheck: siteDistanceM <= ATTENDANCE_SETTINGS.siteRadiusMetersDemo ? "Within site area" : "Outside site area" };
 }
-/** Writes a check-in/out onto a job's primary visit or one of its additional visits, and — for
- *  a real (non-cancelled) visit — mirrors it into the Attendance timeline as a Site event, so
- *  the two stay consistent by construction rather than by convention. */
-export function applyVisitStamp(current: Store, jobId: string, visitId: string | undefined, kind: "checkIn" | "checkOut", stampValue: VisitStamp): Partial<Store> {
+/** Writes a check-in/out onto a job's one visit, and — for a real (non-cancelled) visit —
+ *  mirrors it into the Attendance timeline as a Site event, so the two stay consistent by
+ *  construction rather than by convention. */
+export function applyVisitStamp(current: Store, jobId: string, kind: "checkIn" | "checkOut", stampValue: VisitStamp): Partial<Store> {
   const job = current.jobs.find((entry) => entry.id === jobId);
   if (!job) return {};
-  const engineer = visitId ? job.additionalVisits?.find((visit) => visit.id === visitId)?.engineer : job.engineer;
-  const jobs = current.jobs.map((entry) => {
-    if (entry.id !== jobId) return entry;
-    if (!visitId) return { ...entry, [kind]: stampValue };
-    return { ...entry, additionalVisits: (entry.additionalVisits ?? []).map((visit) => visit.id === visitId ? { ...visit, [kind]: stampValue } : visit) };
-  });
+  const engineer = job.engineer;
+  const jobs = current.jobs.map((entry) => entry.id === jobId ? { ...entry, [kind]: stampValue } : entry);
   if (!engineer) return { jobs };
   const attendancePatch = recordAttendanceEvent(current, {
     engineer, kind: kind === "checkIn" ? "Site check-in" : "Site checkout", source: stampValue.source, at: stampValue.at, syncedAt: stampValue.syncedAt,
@@ -782,56 +847,18 @@ export function applyVisitStamp(current: Store, jobId: string, visitId: string |
   return { jobs, ...attendancePatch };
 }
 
-// Corrections: missed punches, wrong job links, location exceptions and overlapping events.
-// Approving one writes a brand-new "Manual correction" event and marks the original
-// superseded — the original stays in the timeline, distinguishably.
-export type CorrectionKind = "Missed punch" | "Wrong job link" | "Location exception" | "Overlapping event";
+// Corrections: a simple request-and-review trail against one attendance event — what the
+// employee says it should be, why, and the admin's one decision. No categorisation, no
+// re-decision history; approving never rewrites the attendance timeline by itself.
 export type CorrectionStatus = "Pending" | "Approved" | "Rejected";
 export type Correction = {
-  id: string; eventId: string; engineer: string; kind: CorrectionKind; requestedChange: string; reason: string;
+  id: string; eventId: string; engineer: string; requestedChange: string; reason: string;
   status: CorrectionStatus; requestedBy: string; requestedAt: string; reviewer?: string; reviewedAt?: string;
-  proposedAt?: string; proposedKind?: AttendanceEventKind; proposedJobId?: string;
   decisionReason?: string;
-  decisionHistory?: { status: "Approved" | "Rejected"; at: string; by: string; reason?: string }[];
 };
-export function approveCorrection(current: Store, correctionId: string, reviewer: string): Partial<Store> {
-  const correction = current.corrections.find((entry) => entry.id === correctionId);
-  if (!correction || correction.status !== "Pending" || !correction.proposedAt || !correction.proposedKind) return {};
-  const original = current.attendance.find((event) => event.id === correction.eventId);
-  if (original?.supersededBy) return {};
-  const at = correction.proposedAt;
-  const isAddition = correction.kind === "Missed punch";
-  const jobId = correction.proposedJobId ?? (isAddition ? undefined : original?.jobId);
-  const job = current.jobs.find((entry) => entry.id === jobId);
-  const event: AttendanceEvent = {
-    id: newEventId(), engineer: correction.engineer, date: isoDateInIst(at), kind: correction.proposedKind,
-    source: "Manual correction", at, syncedAt: nowIso(), jobId, siteId: job?.siteId,
-    correctionOf: correction.eventId,
-  };
-  // Keep the source event and its location evidence in the audit trail. A missing punch is
-  // an addition; it must never remove a valid earlier check-in from the daily summary.
-  const attendance = [event, ...current.attendance.map((entry) => !isAddition && entry.id === correction.eventId ? { ...entry, supersededBy: event.id } : entry)];
-  const jobs = current.jobs.map((entry) => {
-    let next = { ...entry };
-    if (!isAddition && original?.jobId === entry.id) {
-      if (entry.checkIn?.at === original.at) next.checkIn = undefined;
-      if (entry.checkOut?.at === original.at) next.checkOut = undefined;
-      next.additionalVisits = entry.additionalVisits?.map((visit) => ({ ...visit, checkIn: visit.checkIn?.at === original.at ? undefined : visit.checkIn, checkOut: visit.checkOut?.at === original.at ? undefined : visit.checkOut }));
-    }
-    if (entry.id === jobId && event.kind.startsWith("Site")) {
-      const key = event.kind === "Site check-in" ? "checkIn" : "checkOut";
-      const value: VisitStamp = { at, syncedAt: nowIso(), source: "Manual correction", locationCheck: "Needs review" };
-      if (entry.engineer === event.engineer && entry.scheduledDate === event.date) next[key] = value;
-      else next.additionalVisits = next.additionalVisits?.map((visit) => visit.engineer === event.engineer && visit.plannedDate === event.date && !visit.cancelled ? { ...visit, [key]: value } : visit);
-    }
-    return next;
-  });
-  return { attendance, jobs, corrections: current.corrections.map((entry) => entry.id === correctionId ? { ...entry, status: "Approved" as const, reviewer, reviewedAt: nowIso(), decisionHistory: [...(entry.decisionHistory ?? []), { status: "Approved" as const, at: nowIso(), by: reviewer }] } : entry) };
-}
 export function reviewCorrection(current: Store, correctionId: string, status: "Approved" | "Rejected", reviewer: string, reason?: string): Partial<Store> {
-  if (status === "Approved") return approveCorrection(current, correctionId, reviewer);
-  if (!reason?.trim()) return {};
-  return { corrections: current.corrections.map((entry) => entry.id === correctionId && entry.status === "Pending" ? { ...entry, status: "Rejected" as const, reviewer, reviewedAt: nowIso(), decisionReason: reason.trim(), decisionHistory: [...(entry.decisionHistory ?? []), { status: "Rejected" as const, at: nowIso(), by: reviewer, reason: reason.trim() }] } : entry) };
+  if (status === "Rejected" && !reason?.trim()) return {};
+  return { corrections: current.corrections.map((entry) => entry.id === correctionId && entry.status === "Pending" ? { ...entry, status, reviewer, reviewedAt: nowIso(), decisionReason: reason?.trim() || undefined } : entry) };
 }
 
 /** A missing check-in is never treated as proof of absence — "Check-in not received" only fires
@@ -844,33 +871,24 @@ export function computeVisitStatus(visit: { plannedDate: string; plannedStart: s
   if (new Date(nowIsoValue).getTime() > plannedAt + ATTENDANCE_SETTINGS.lateGraceMinutesDemo * 60_000) return "Check-in not received";
   return "Scheduled";
 }
-/** One row per planned visit (primary + additional) on a given day, across every job — the
- *  backbone of Jobs → Today. Distinguishes a job from a visit: one job can produce several rows
- *  across different days, and a day can hold visits from many jobs. */
+/** One row per job scheduled on a given day — the backbone of Jobs → Today. */
 export type VisitRow = {
   jobId: string; jobNumber: string; jobType: JobType; customer: string; siteId: string;
   engineer: string; plannedDate: string; plannedStart: string; plannedEnd: string;
   visitStatus: VisitStatus; checkIn?: VisitStamp; checkOut?: VisitStamp;
-  outcome?: VisitOutcome; jobStatus: JobStatus; isPrimary: boolean; visitId?: string;
+  outcome?: VisitOutcome; jobStatus: JobStatus;
 };
 export function visitsOn(jobs: Job[], date: string, nowIsoValue: string = nowIso()): VisitRow[] {
   const rows: VisitRow[] = [];
   jobs.forEach((job) => {
-    if (job.engineer && job.scheduledDate === date) {
-      const window = visitWindow(job);
-      rows.push({
-        jobId: job.id, jobNumber: job.number, jobType: job.type, customer: job.customer, siteId: job.siteId, engineer: job.engineer,
-        plannedDate: date, plannedStart: window.start, plannedEnd: window.end,
-        visitStatus: computeVisitStatus({ plannedDate: date, plannedStart: window.start, checkIn: job.checkIn, checkOut: job.checkOut, cancelled: job.status === "Cancelled" }, nowIsoValue),
-        checkIn: job.checkIn, checkOut: job.checkOut, outcome: job.outcome, jobStatus: job.status, isPrimary: true,
-      });
-    }
-    (job.additionalVisits ?? []).filter((visit) => visit.plannedDate === date).forEach((visit) => rows.push({
-      jobId: job.id, jobNumber: job.number, jobType: job.type, customer: job.customer, siteId: job.siteId, engineer: visit.engineer,
-      plannedDate: visit.plannedDate, plannedStart: visit.plannedStart, plannedEnd: visit.plannedEnd,
-      visitStatus: computeVisitStatus({ ...visit, cancelled: visit.cancelled || job.status === "Cancelled" }, nowIsoValue), checkIn: visit.checkIn, checkOut: visit.checkOut, outcome: visit.outcome,
-      jobStatus: job.status, isPrimary: false, visitId: visit.id,
-    }));
+    if (!job.engineer || job.scheduledDate !== date) return;
+    const window = visitWindow(job);
+    rows.push({
+      jobId: job.id, jobNumber: job.number, jobType: job.type, customer: job.customer, siteId: job.siteId, engineer: job.engineer,
+      plannedDate: date, plannedStart: window.start, plannedEnd: window.end,
+      visitStatus: computeVisitStatus({ plannedDate: date, plannedStart: window.start, checkIn: job.checkIn, checkOut: job.checkOut, cancelled: job.status === "Cancelled" }, nowIsoValue),
+      checkIn: job.checkIn, checkOut: job.checkOut, outcome: job.outcome, jobStatus: job.status,
+    });
   });
   return rows.sort((a, b) => timeToMinutes(a.plannedStart) - timeToMinutes(b.plannedStart));
 }
@@ -879,7 +897,7 @@ export function visitsOn(jobs: Job[], date: string, nowIsoValue: string = nowIso
 // payments against them. Deliberately separate from CompanyBill (office/company expenses):
 // these are person-linked claims, not vendor bills, and must never be conflated in Accounts.
 export type ExpenseCategory = "Travel" | "Food" | "Accommodation" | "Parking / Toll" | "Materials" | "Other";
-export type ExpenseStatus = "Draft" | "Pending Approval" | "Changes Requested" | "Approved" | "Rejected";
+export type ExpenseStatus = "Draft" | "Pending Approval" | "Approved" | "Rejected";
 export const EXPENSE_CATEGORIES: ExpenseCategory[] = ["Travel", "Food", "Accommodation", "Parking / Toll", "Materials", "Other"];
 export type ExpenseHistoryEntry = { action: string; at: string; by: string; reason?: string };
 export type Expense = {
@@ -900,7 +918,6 @@ export type Expense = {
 
 export type PaymentKind = "Advance Paid" | "Reimbursement Paid" | "Money Returned";
 export type SettlementMode = "Cash" | "UPI" | "Bank Transfer";
-export type PaymentStatus2 = "Posted" | "Reversed";
 export type ExpensePayment = {
   id: string;
   engineer: string;
@@ -914,24 +931,19 @@ export type ExpensePayment = {
   overrideReason?: string;
   recordedBy: string;
   recordedAt: string;
-  status: PaymentStatus2;
-  reversedReason?: string;
-  reversedBy?: string;
-  reversedAt?: string;
 };
 
 /** The one shared balance calculation. Positive = cash still with the engineer; negative =
- *  SPM owes a reimbursement; zero = settled. Only *current* status counts — a reversed
- *  payment or an expense moved off "Approved" simply stops contributing, so nothing needs a
- *  separate "already applied" flag and nothing can be double-counted. */
+ *  SPM owes a reimbursement; zero = settled. An advance is settled against approved claims
+ *  only — a claim still pending or rejected never reduces it. */
 export function engineerBalance(expenses: Expense[], payments: ExpensePayment[], engineer: string) {
-  const posted = payments.filter((p) => p.engineer === engineer && p.status !== "Reversed");
-  const advancesPaid = posted.filter((p) => p.type === "Advance Paid").reduce((sum, p) => sum + p.amount, 0);
-  const reimbursementsPaid = posted.filter((p) => p.type === "Reimbursement Paid").reduce((sum, p) => sum + p.amount, 0);
-  const moneyReturned = posted.filter((p) => p.type === "Money Returned").reduce((sum, p) => sum + p.amount, 0);
+  const paid = payments.filter((p) => p.engineer === engineer);
+  const advancesPaid = paid.filter((p) => p.type === "Advance Paid").reduce((sum, p) => sum + p.amount, 0);
+  const reimbursementsPaid = paid.filter((p) => p.type === "Reimbursement Paid").reduce((sum, p) => sum + p.amount, 0);
+  const moneyReturned = paid.filter((p) => p.type === "Money Returned").reduce((sum, p) => sum + p.amount, 0);
   const mine = expenses.filter((e) => e.engineer === engineer);
   const approvedExpenses = mine.filter((e) => e.status === "Approved").reduce((sum, e) => sum + e.amount, 0);
-  const pendingClaims = mine.filter((e) => e.status === "Pending Approval" || e.status === "Changes Requested").reduce((sum, e) => sum + e.amount, 0);
+  const pendingClaims = mine.filter((e) => e.status === "Pending Approval").reduce((sum, e) => sum + e.amount, 0);
   const balance = Math.round((advancesPaid + reimbursementsPaid - moneyReturned - approvedExpenses) * 100) / 100;
   return { advancesPaid, reimbursementsPaid, moneyReturned, approvedExpenses, pendingClaims, balance };
 }
@@ -949,7 +961,7 @@ export function duplicateExpenses(expenses: Expense[], candidate: Pick<Expense, 
  *  not guaranteed globally unique across modes/engineers. */
 export function duplicateReference(payments: ExpensePayment[], reference: string, excludeId?: string) {
   if (!reference.trim()) return [];
-  return payments.filter((p) => p.id !== excludeId && p.status !== "Reversed" && p.reference?.trim().toLowerCase() === reference.trim().toLowerCase());
+  return payments.filter((p) => p.id !== excludeId && p.reference?.trim().toLowerCase() === reference.trim().toLowerCase());
 }
 
 // Sales pipeline, ahead of a quotation existing. A lead's `stage` and a linked quotation's
@@ -990,39 +1002,19 @@ type Store = {
   expenses: Expense[]; advancePayments: ExpensePayment[];
   customerReceipts: CustomerReceipt[]; customerTds: CustomerTds[];
   payables: Payable[]; supplierPayments: SupplierPayment[];
-  leads: Lead[]; quotes: Quote[];
+  leads: Lead[]; quotes: Quote[]; customers: Customer[]; customerOrders: CustomerOrder[];
+  deliveryChallans: DeliveryChallan[];
+  rentals: Rental[];
 };
 
 // ─── Advance & Expense actions ──────────────────────────────────────────────
 export function submitExpense(current: Store, expense: Expense): Partial<Store> {
   return { expenses: [expense, ...current.expenses] };
 }
-export function reviewExpense(current: Store, expenseId: string, decision: "Approved" | "Rejected" | "Changes Requested", reviewer: string, reason?: string): Partial<Store> {
+export function reviewExpense(current: Store, expenseId: string, decision: "Approved" | "Rejected", reviewer: string, reason?: string): Partial<Store> {
   return { expenses: current.expenses.map((entry) => entry.id !== expenseId ? entry : {
     ...entry, status: decision,
-    history: [...entry.history, { action: decision === "Changes Requested" ? "Sent back for changes" : decision, at: stamp(), by: reviewer, reason }],
-  }) };
-}
-/** Edits a Changes-Requested claim in place and puts it back in the approval queue — never a
- *  new record, so its history and identity stay intact across correction rounds. */
-export function resubmitExpense(current: Store, expenseId: string, patch: Pick<Expense, "category" | "amount" | "description" | "billFiles" | "billMissingReason" | "jobId">): Partial<Store> {
-  return { expenses: current.expenses.map((entry) => entry.id !== expenseId ? entry : {
-    ...entry, ...patch, status: "Pending Approval" as const,
-    history: [...entry.history, { action: "Corrected and resubmitted", at: stamp(), by: entry.submittedBy }],
-  }) };
-}
-/** Reversing an approval moves the claim back to Changes Requested — it immediately stops
- *  counting toward the balance (only "Approved" status counts) and re-enters the correction
- *  flow rather than being silently edited or deleted. */
-export function reverseExpenseApproval(current: Store, expenseId: string, reviewer: string, reason: string): Partial<Store> {
-  return { expenses: current.expenses.map((entry) => entry.id !== expenseId || entry.status !== "Approved" ? entry : {
-    ...entry, status: "Changes Requested" as const,
-    history: [...entry.history, { action: "Approval reversed", at: stamp(), by: reviewer, reason }],
-  }) };
-}
-export function reversePayment(current: Store, paymentId: string, reviewer: string, reason: string): Partial<Store> {
-  return { advancePayments: current.advancePayments.map((entry) => entry.id !== paymentId || entry.status === "Reversed" ? entry : {
-    ...entry, status: "Reversed" as const, reversedReason: reason, reversedBy: reviewer, reversedAt: stamp(),
+    history: [...entry.history, { action: decision, at: stamp(), by: reviewer, reason }],
   }) };
 }
 
@@ -1071,10 +1063,10 @@ let state: Store = {
     { id: "att-seed-7", engineer: "Anitha Raj", date: "2026-09-16", kind: "Office check-in", source: "Biometric", at: "2026-09-16T13:10:00.000Z", syncedAt: "2026-09-17T02:35:00.000Z", sourceEventId: "BIO-0916-AR-IN-LATE" },
   ],
   corrections: [
-    { id: "COR-001", eventId: "att-seed-4", engineer: "Sandeep Kulkarni", kind: "Missed punch", requestedChange: "Add missing office checkout at 06:10 PM", reason: "Forgot to badge out before leaving for the site visit.", status: "Pending", requestedBy: "Sandeep Kulkarni", requestedAt: "16 Sep 2026 · Sandeep Kulkarni", proposedAt: "2026-09-16T12:40:00.000Z", proposedKind: "Office checkout" },
-    { id: "COR-002", eventId: "att-seed-7", engineer: "Anitha Raj", kind: "Overlapping event", requestedChange: "Confirm the check-in belongs to the 16th, not a duplicate of an earlier device sync.", reason: "Device showed the same badge twice within a few minutes on the offline log.", status: "Rejected", requestedBy: "Priya Shah", requestedAt: "16 Sep 2026 · Priya Shah", reviewer: "Arun Kumar", reviewedAt: "16 Sep 2026 · 5:40 PM", decisionReason: "Checked the device log — only one badge read was recorded. No change needed.", decisionHistory: [{ status: "Rejected", at: "2026-09-16T12:10:00.000Z", by: "Arun Kumar", reason: "Checked the device log — only one badge read was recorded. No change needed." }] },
-    { id: "COR-003", eventId: "att-seed-1", engineer: "Nikhil Rao", kind: "Wrong job link", requestedChange: "Link the 08:50 AM office check-in to JOB-1040, not left unlinked.", reason: "Office check-in that morning was for the urgent Biocon lab job, not a general day start.", status: "Approved", requestedBy: "Nikhil Rao", requestedAt: "17 Sep 2026 · Nikhil Rao", proposedJobId: "JOB-1040", reviewer: "Arun Kumar", reviewedAt: "17 Sep 2026 · 9:05 AM", decisionHistory: [{ status: "Approved", at: "2026-09-17T03:35:00.000Z", by: "Arun Kumar" }] },
-    { id: "COR-004", eventId: "att-seed-5", engineer: "Sandeep Kulkarni", kind: "Location exception", requestedChange: "Confirm the check-in distance is expected — the registered site pin may be outdated.", reason: "Cloudnine's OT entrance is a short walk from where the GPS fix landed; the building pin looks off.", status: "Pending", requestedBy: "Sandeep Kulkarni", requestedAt: "16 Sep 2026 · Sandeep Kulkarni" },
+    { id: "COR-001", eventId: "att-seed-4", engineer: "Sandeep Kulkarni", requestedChange: "Add missing office checkout at 06:10 PM", reason: "Forgot to badge out before leaving for the site visit.", status: "Pending", requestedBy: "Sandeep Kulkarni", requestedAt: "16 Sep 2026 · Sandeep Kulkarni" },
+    { id: "COR-002", eventId: "att-seed-7", engineer: "Anitha Raj", requestedChange: "Confirm the check-in belongs to the 16th, not a duplicate of an earlier device sync.", reason: "Device showed the same badge twice within a few minutes on the offline log.", status: "Rejected", requestedBy: "Priya Shah", requestedAt: "16 Sep 2026 · Priya Shah", reviewer: "Arun Kumar", reviewedAt: "16 Sep 2026 · 5:40 PM", decisionReason: "Checked the device log — only one badge read was recorded. No change needed." },
+    { id: "COR-003", eventId: "att-seed-1", engineer: "Nikhil Rao", requestedChange: "Link the 08:50 AM office check-in to JOB-1040, not left unlinked.", reason: "Office check-in that morning was for the urgent Biocon lab job, not a general day start.", status: "Approved", requestedBy: "Nikhil Rao", requestedAt: "17 Sep 2026 · Nikhil Rao", reviewer: "Arun Kumar", reviewedAt: "17 Sep 2026 · 9:05 AM" },
+    { id: "COR-004", eventId: "att-seed-5", engineer: "Sandeep Kulkarni", requestedChange: "Confirm the check-in distance is expected — the registered site pin may be outdated.", reason: "Cloudnine's OT entrance is a short walk from where the GPS fix landed; the building pin looks off.", status: "Pending", requestedBy: "Sandeep Kulkarni", requestedAt: "16 Sep 2026 · Sandeep Kulkarni" },
   ],
   instruments: [
     { id: "CI-0101", customer: "Biocon Biologics", siteId: "SITE-08", department: "QC microbiology", name: "Airborne Particle Counter", make: "TSI", model: "AeroTrak 9306", serial: "9306-BC-22041", range: "0.3–10 μm · 28.3 LPM", accuracy: "±10% count accuracy", intervalMonths: 12, procedure: "ISO 14644-1 · SPM-WI-PC-01", custody: "In our lab", receivedAt: "2026-09-15", condition: "Good", notes: "Received for urgent annual calibration; audit copy requested.", status: "Active", history: [{ id: "cr-1", date: "2025-09-14", engineer: "Nikhil Rao", result: "Pass", certificate: "NABL/SPM/2025/0331", jobNumber: "JOB-1018" }] },
@@ -1105,13 +1097,12 @@ let state: Store = {
     { id: "CI-0126", customer: "Biocon Biologics", siteId: "SITE-08", department: "QC microbiology", name: "Particle Counter — Backup Unit", make: "TSI", model: "AeroTrak 9110", serial: "9110-BC-0021", range: "0.3–10 μm · 2.83 LPM", accuracy: "±10% count accuracy", intervalMonths: 12, procedure: "ISO 14644-1 · SPM-WI-PC-01", custody: "In transit", notes: "Being moved between two QC labs; expected on site within the week.", status: "Active", history: [] },
   ],
   jobs: [
-    { id: "JOB-1041", number: "JOB-1041", type: "Calibration", customer: "Aster Pharma", siteId: "SITE-07", instrumentIds: ["CI-0102", "CI-0103", "CI-0104", "CI-0105"], stockIds: [], description: "One Whitefield visit for three particle counters and one aerosol photometer.", doneAt: "Customer site", scheduledDate: "2026-09-21", slot: "Full day", hours: 7, engineer: "Nikhil Rao", status: "Scheduled", expectedSpares: [{ item: "Zero Count Filter", quantity: 1 }], usedSpares: [], results: [], travelNotes: "Coordinate entry clearance with sterile manufacturing.", photos: 0, activities: [{ title: "Assigned as one site visit", meta: "16 Sep 2026 · Priya Shah", tone: "assigned" }], additionalEngineers: ["Anitha Raj"], additionalVisits: [{ id: "visit-1041-a", engineer: "Nikhil Rao", plannedDate: "2026-09-14", plannedStart: "09:30", plannedEnd: "13:00", checkIn: { at: "2026-09-14T04:00:00.000Z", syncedAt: "2026-09-14T04:00:00.000Z", source: "Mobile", locationCheck: "Within site area", location: { lat: 12.9698, lng: 77.75, accuracyM: 14 }, siteDistanceM: 20 }, checkOut: { at: "2026-09-14T05:10:00.000Z", syncedAt: "2026-09-14T05:10:00.000Z", source: "Mobile", locationCheck: "Within site area", location: { lat: 12.9698, lng: 77.75, accuracyM: 14 }, siteDistanceM: 20 }, outcome: "Customer unavailable", outcomeNote: "Sterile manufacturing was mid-batch; access denied. Rescheduled as the full-day visit below." }] },
-    { id: "JOB-1040", number: "JOB-1040", type: "Calibration", customer: "Biocon Biologics", siteId: "SITE-08", instrumentIds: ["CI-0101"], stockIds: [], description: "Urgent annual calibration of AeroTrak particle counter received in SPM lab.", doneAt: "Our lab", scheduledDate: "2026-09-16", slot: "Afternoon", hours: 3, engineer: "Nikhil Rao", status: "In progress", expectedSpares: [], usedSpares: [], results: [], travelNotes: "Certificate required for audit file.", photos: 0, startedAt: "2026-09-16", activities: [{ title: "Started in SPM lab", meta: "16 Sep 2026 · Nikhil Rao", tone: "system" }, { title: "Received from Biocon Biologics", meta: "15 Sep 2026 · Priya Shah", tone: "assigned" }] },
-    { id: "JOB-1039", number: "JOB-1039", type: "Calibration", customer: "Cloudnine Hospitals", siteId: "SITE-09", instrumentIds: ["CI-0106"], stockIds: [], description: "Annual flow calibration for portable air sampler.", doneAt: "Customer site", scheduledDate: "2026-09-19", slot: "Full day", hours: 4, priority: "High", status: "Unassigned", expectedSpares: [{ item: "Air Sampler Petri Dish Adaptor", quantity: 1 }], usedSpares: [], results: [], travelNotes: "Theatre access only after 18:00.", photos: 0, activities: [{ title: "Job created", meta: "15 Sep 2026 · Arun Kumar", tone: "system" }] },
-    { id: "JOB-1038", number: "JOB-1038", type: "Rental delivery", customer: "Aster Pharma", siteId: "SITE-07", instrumentIds: [], stockIds: ["INS-0042"], description: "Backup particle counter on rental while customer unit is in calibration.", doneAt: "Customer site", scheduledDate: "2026-09-18", slot: "Morning", hours: 3, engineer: "Sandeep Kulkarni", status: "Scheduled", expectedSpares: [], usedSpares: [], results: [], travelNotes: "Return scheduled 24 Sep.", photos: 0, activities: [{ title: "Assigned to Sandeep Kulkarni", meta: "15 Sep 2026 · Priya Shah", tone: "assigned" }] },
-    { id: "JOB-1042", number: "JOB-1042", type: "Service", customer: "Aster Pharma", siteId: "SITE-07", instrumentIds: [], stockIds: [], description: "Preventive check on cleanroom particle counters ahead of next month's audit.", doneAt: "Customer site", scheduledDate: "2026-09-17", slot: "Morning", plannedStart: "09:30", plannedEnd: "13:00", hours: 3, engineer: "Nikhil Rao", status: "In progress", startedAt: "2026-09-17", expectedSpares: [], usedSpares: [], results: [], travelNotes: "", photos: 0, checkIn: { at: "2026-09-17T04:45:00.000Z", syncedAt: "2026-09-17T04:47:00.000Z", source: "Mobile", locationCheck: "Within site area", location: { lat: 12.9701, lng: 77.7503, accuracyM: 12 }, siteDistanceM: 35 }, activities: [{ title: "Checked in at Whitefield sterile plant", meta: "17 Sep 2026 · 10:15 AM · Mobile", tone: "system" }, { title: "Assigned to Nikhil Rao", meta: "16 Sep 2026 · Priya Shah", tone: "assigned" }] },
-    { id: "JOB-1043", number: "JOB-1043", type: "Service", customer: "Biocon Biologics", siteId: "SITE-08", instrumentIds: [], stockIds: [], description: "AMC preventive visit — aerosol generator check.", doneAt: "Customer site", scheduledDate: "2026-09-17", slot: "Morning", plannedStart: "09:30", plannedEnd: "12:30", hours: 3, engineer: "Sandeep Kulkarni", status: "Scheduled", expectedSpares: [], usedSpares: [], results: [], travelNotes: "", photos: 0, activities: [{ title: "Assigned to Sandeep Kulkarni", meta: "15 Sep 2026 · Priya Shah", tone: "assigned" }] },
-    { id: "JOB-1044", number: "JOB-1044", type: "Repair", customer: "Cloudnine Hospitals", siteId: "SITE-09", instrumentIds: [], stockIds: [], description: "Portable air sampler flow fault — repaired on site.", doneAt: "Customer site", scheduledDate: "2026-09-16", slot: "Morning", plannedStart: "10:00", plannedEnd: "12:30", hours: 3, engineer: "Sandeep Kulkarni", status: "Completed", completedAt: "2026-09-16", expectedSpares: [], usedSpares: [], results: [], travelNotes: "", photos: 0, checkIn: { at: "2026-09-16T04:30:00.000Z", syncedAt: "2026-09-16T04:31:00.000Z", source: "Mobile", locationCheck: "Outside site area", location: { lat: 12.9542, lng: 77.6465, accuracyM: 18 }, siteDistanceM: 850 }, checkOut: { at: "2026-09-16T07:00:00.000Z", syncedAt: "2026-09-16T07:01:00.000Z", source: "Mobile", locationCheck: "Outside site area", location: { lat: 12.9542, lng: 77.6465, accuracyM: 16 }, siteDistanceM: 850 }, outcome: "Work completed", outcomeNote: "Replaced flow sensor; verified against reference standard.", activities: [{ title: "Completed — checked in away from the registered site coordinates", meta: "16 Sep 2026 · Sandeep Kulkarni", tone: "done" }, { title: "Assigned to Sandeep Kulkarni", meta: "14 Sep 2026 · Priya Shah", tone: "assigned" }] },
+    { id: "JOB-1041", number: "JOB-1041", type: "Calibration", customer: "Aster Pharma", siteId: "SITE-07", instrumentIds: ["CI-0102", "CI-0103", "CI-0104", "CI-0105"], stockIds: [], description: "One Whitefield visit for three particle counters and one aerosol photometer. Rescheduled after the sterile manufacturing area was mid-batch on the first attempt.", doneAt: "Site visit", scheduledDate: "2026-09-21", plannedStart: "09:30", hours: 7, engineer: "Nikhil Rao", status: "Scheduled", expectedSpares: [{ item: "Zero Count Filter", quantity: 1 }], usedSpares: [], results: [], travelNotes: "Coordinate entry clearance with sterile manufacturing.", photos: 0, activities: [{ title: "Assigned as one site visit", meta: "16 Sep 2026 · Priya Shah", tone: "assigned" }] },
+    { id: "JOB-1040", number: "JOB-1040", type: "Calibration", customer: "Biocon Biologics", siteId: "SITE-08", instrumentIds: ["CI-0101"], stockIds: [], description: "Urgent annual calibration of AeroTrak particle counter received in SPM lab.", doneAt: "In-lab", scheduledDate: "2026-09-16", plannedStart: "14:00", hours: 3, engineer: "Nikhil Rao", status: "In progress", expectedSpares: [], usedSpares: [], results: [], travelNotes: "Certificate required for audit file.", photos: 0, startedAt: "2026-09-16", receivedAt: "2026-09-15", receivedCondition: "Good — no visible damage", activities: [{ title: "Started in SPM lab", meta: "16 Sep 2026 · Nikhil Rao", tone: "system" }, { title: "Received from Biocon Biologics — condition: Good — no visible damage", meta: "15 Sep 2026 · Priya Shah", tone: "assigned" }] },
+    { id: "JOB-1039", number: "JOB-1039", type: "Calibration", customer: "Cloudnine Hospitals", siteId: "SITE-09", instrumentIds: ["CI-0106"], stockIds: [], description: "Annual flow calibration for portable air sampler.", doneAt: "Site visit", scheduledDate: "2026-09-19", plannedStart: "09:30", hours: 4, status: "Unassigned", expectedSpares: [{ item: "Air Sampler Petri Dish Adaptor", quantity: 1 }], usedSpares: [], results: [], travelNotes: "Theatre access only after 18:00.", photos: 0, activities: [{ title: "Job created", meta: "15 Sep 2026 · Arun Kumar", tone: "system" }] },
+    { id: "JOB-1042", number: "JOB-1042", type: "Calibration", customer: "Aster Pharma", siteId: "SITE-07", instrumentIds: [], stockIds: [], description: "Preventive check on cleanroom particle counters ahead of next month's audit.", doneAt: "Site visit", scheduledDate: "2026-09-17", plannedStart: "09:30", hours: 3, engineer: "Nikhil Rao", status: "In progress", startedAt: "2026-09-17", expectedSpares: [], usedSpares: [], results: [], travelNotes: "", photos: 0, checkIn: { at: "2026-09-17T04:45:00.000Z", syncedAt: "2026-09-17T04:47:00.000Z", source: "Mobile", locationCheck: "Within site area", location: { lat: 12.9701, lng: 77.7503, accuracyM: 12 }, siteDistanceM: 35 }, activities: [{ title: "Checked in at Whitefield sterile plant", meta: "17 Sep 2026 · 10:15 AM · Mobile", tone: "system" }, { title: "Assigned to Nikhil Rao", meta: "16 Sep 2026 · Priya Shah", tone: "assigned" }] },
+    { id: "JOB-1043", number: "JOB-1043", type: "Calibration", customer: "Biocon Biologics", siteId: "SITE-08", instrumentIds: [], stockIds: [], description: "AMC preventive visit — aerosol generator check.", doneAt: "Site visit", scheduledDate: "2026-09-17", plannedStart: "09:30", hours: 3, engineer: "Sandeep Kulkarni", status: "Scheduled", expectedSpares: [], usedSpares: [], results: [], travelNotes: "", photos: 0, activities: [{ title: "Assigned to Sandeep Kulkarni", meta: "15 Sep 2026 · Priya Shah", tone: "assigned" }] },
+    { id: "JOB-1044", number: "JOB-1044", type: "Repair", customer: "Cloudnine Hospitals", siteId: "SITE-09", instrumentIds: [], stockIds: [], description: "Portable air sampler flow fault — repaired on site.", doneAt: "Site visit", scheduledDate: "2026-09-16", plannedStart: "10:00", hours: 3, engineer: "Sandeep Kulkarni", status: "Completed", completedAt: "2026-09-16", expectedSpares: [], usedSpares: [], results: [], travelNotes: "", photos: 0, checkIn: { at: "2026-09-16T04:30:00.000Z", syncedAt: "2026-09-16T04:31:00.000Z", source: "Mobile", locationCheck: "Outside site area", location: { lat: 12.9542, lng: 77.6465, accuracyM: 18 }, siteDistanceM: 850 }, checkOut: { at: "2026-09-16T07:00:00.000Z", syncedAt: "2026-09-16T07:01:00.000Z", source: "Mobile", locationCheck: "Outside site area", location: { lat: 12.9542, lng: 77.6465, accuracyM: 16 }, siteDistanceM: 850 }, outcome: "Work completed", outcomeNote: "Replaced flow sensor; verified against reference standard.", activities: [{ title: "Completed — checked in away from the registered site coordinates", meta: "16 Sep 2026 · Sandeep Kulkarni", tone: "done" }, { title: "Assigned to Sandeep Kulkarni", meta: "14 Sep 2026 · Priya Shah", tone: "assigned" }] },
   ],
 
   statutoryPaid: {},
@@ -1145,11 +1136,11 @@ let state: Store = {
     ] },
   ],
   orders: [
-    { id: "PO-24095", number: "PO-24095", vendor: "Bengaluru Lab Spares", contact: "Rakesh Gowda", vendorGstin: "29AAFCB9012L1ZR", vendorState: "Karnataka", vendorAddress: "17, Rajajinagar Industrial Town, Bengaluru, Karnataka 560010", paymentTerms: "Net 30", tdsSection: "194C", tdsRate: 1, orderDate: "2026-09-10", expectedDate: "2026-09-14", status: "Sent", owner: "Priya Shah", deliveryAddress: WAREHOUSE, freightCharges: 0, notes: "", linkedQuote: "", items: [{ id: "po95-1", item: "AFM probe tips — 10 pack", description: "Consumable AFM probe tips, pack of 10", hsn: "9012", quantity: 30, rate: 15800, gst: 18, received: 0, serials: [] }], receipts: [], sentAt: "10 Sep 2026", activities: [{ title: "Sent to Bengaluru Lab Spares", meta: "10 Sep 2026 · Priya Shah", tone: "sent" }] },
-    { id: "PO-24094", number: "PO-24094", vendor: "Precision Systems India", contact: "Vikram Joshi", vendorGstin: "27AACCP1234F1Z8", vendorState: "Maharashtra", vendorAddress: "Plot 22, Bhosari MIDC, Pune, Maharashtra 411026", paymentTerms: "Net 30", tdsSection: "194C", tdsRate: 1, orderDate: "2026-09-06", expectedDate: "2026-09-20", status: "Partly received", owner: "Arun Kumar", deliveryAddress: WAREHOUSE, freightCharges: 4500, notes: "", linkedQuote: "QT-2026-0827 R1", items: [{ id: "po94-1", item: "Vacuum seal kit", description: "Vacuum seal maintenance kit", hsn: "8484", quantity: 40, rate: 9800, gst: 18, stockId: "SP-033", received: 25, serials: [] }, { id: "po94-2", item: "Optical lens cloth", description: "Lint-free optical lens cloth", hsn: "6307", quantity: 20, rate: 340, gst: 12, stockId: "CN-091", received: 0, serials: [] }], receipts: [{ id: "rc-1", date: "2026-09-13", location: WAREHOUSE, challan: "PSI/DC/8841", note: "", lines: [{ lineId: "po94-1", quantity: 25, serials: [] }] }], sentAt: "06 Sep 2026", activities: [{ title: "Received 25 of Vacuum seal kit", meta: "13 Sep 2026 · Priya Shah", tone: "received" }, { title: "Sent to Precision Systems India", meta: "06 Sep 2026 · Arun Kumar", tone: "sent" }] },
-    { id: "PO-24093", number: "PO-24093", vendor: "Optika Instruments", contact: "Farah Sheikh", vendorGstin: "24AABCO4455N1ZV", vendorState: "Gujarat", vendorAddress: "9, GIDC Vatva, Ahmedabad, Gujarat 382445", paymentTerms: "Net 45", tdsSection: "194Q", tdsRate: 0.1, orderDate: "2026-09-12", expectedDate: "2026-10-05", status: "Awaiting approval", owner: "Priya Shah", deliveryAddress: WAREHOUSE, freightCharges: 0, notes: "Quote confirmed over email on 11 Sep.", linkedQuote: "", items: [{ id: "po93-1", item: "Optical Microscope MX-5", description: "Optical microscope with 5 MP imaging", hsn: "9011", quantity: 2, rate: 168000, gst: 18, tracked: true, received: 0, serials: [] }], receipts: [], activities: [{ title: "Sent for approval — above ₹2,00,000", meta: "12 Sep 2026 · Priya Shah", tone: "system" }] },
-    { id: "PO-24092", number: "PO-24092", vendor: "Nanotech Supplies", contact: "Divya Krishnan", vendorGstin: "33AAGCN7781K1ZP", vendorState: "Tamil Nadu", vendorAddress: "5, Ambattur Industrial Estate, Chennai, Tamil Nadu 600058", paymentTerms: "Net 15", tdsSection: "—", tdsRate: 0, orderDate: "2026-09-15", expectedDate: "2026-09-25", status: "Draft", owner: "Arun Kumar", deliveryAddress: WAREHOUSE, freightCharges: 0, notes: "", linkedQuote: "", items: [{ id: "po92-1", item: "O-ring set — 25 pack", description: "Nitrile O-ring assortment, 25 pack", hsn: "4016", quantity: 15, rate: 1450, gst: 18, received: 0, serials: [] }], receipts: [], activities: [{ title: "Draft created", meta: "15 Sep 2026 · Arun Kumar", tone: "system" }] },
-    { id: "PO-24091", number: "PO-24091", vendor: "Precision Systems India", contact: "Vikram Joshi", vendorGstin: "27AACCP1234F1Z8", vendorState: "Maharashtra", vendorAddress: "Plot 22, Bhosari MIDC, Pune, Maharashtra 411026", paymentTerms: "Net 30", tdsSection: "194C", tdsRate: 1, orderDate: "2026-08-26", expectedDate: "2026-09-02", status: "Received", owner: "Priya Shah", deliveryAddress: WAREHOUSE, freightCharges: 0, notes: "", linkedQuote: "", items: [{ id: "po91-1", item: "Vacuum seal kit", description: "Vacuum seal maintenance kit", hsn: "8484", quantity: 20, rate: 9800, gst: 18, stockId: "SP-033", received: 20, serials: [] }], receipts: [{ id: "rc-0", date: "2026-09-02", location: WAREHOUSE, challan: "PSI/DC/8790", note: "", lines: [{ lineId: "po91-1", quantity: 20, serials: [] }] }], vendorBill: "PSI/INV/2026/551", sentAt: "26 Aug 2026", activities: [{ title: "All items received", meta: "02 Sep 2026 · Priya Shah", tone: "received" }, { title: "Sent to Precision Systems India", meta: "26 Aug 2026 · Priya Shah", tone: "sent" }] },
+    { id: "PO-24095", number: "PO-24095", vendor: "Bengaluru Lab Spares", contact: "Rakesh Gowda", vendorGstin: "29AAFCB9012L1ZR", vendorState: "Karnataka", vendorAddress: "17, Rajajinagar Industrial Town, Bengaluru, Karnataka 560010", paymentTerms: "Net 30", tdsSection: "194C", tdsRate: 1, orderDate: "2026-09-10", expectedDate: "2026-09-14", status: "Sent", owner: "Priya Shah", deliveryAddress: WAREHOUSE, freightCharges: 0, notes: "", linkedOrder: "", items: [{ id: "po95-1", item: "AFM probe tips — 10 pack", description: "Consumable AFM probe tips, pack of 10", hsn: "9012", quantity: 30, rate: 15800, gst: 18, received: 0, serials: [] }], receipts: [], sentAt: "10 Sep 2026", activities: [{ title: "Sent to Bengaluru Lab Spares", meta: "10 Sep 2026 · Priya Shah", tone: "sent" }] },
+    { id: "PO-24094", number: "PO-24094", vendor: "Precision Systems India", contact: "Vikram Joshi", vendorGstin: "27AACCP1234F1Z8", vendorState: "Maharashtra", vendorAddress: "Plot 22, Bhosari MIDC, Pune, Maharashtra 411026", paymentTerms: "Net 30", tdsSection: "194C", tdsRate: 1, orderDate: "2026-09-06", expectedDate: "2026-09-20", status: "Partly received", owner: "Arun Kumar", deliveryAddress: WAREHOUSE, freightCharges: 4500, notes: "", linkedOrder: "ORD-2026-0500", items: [{ id: "po94-1", item: "Vacuum seal kit", description: "Vacuum seal maintenance kit", hsn: "8484", quantity: 40, rate: 9800, gst: 18, stockId: "SP-033", received: 25, serials: [] }, { id: "po94-2", item: "Optical lens cloth", description: "Lint-free optical lens cloth", hsn: "6307", quantity: 20, rate: 340, gst: 12, stockId: "CN-091", received: 0, serials: [] }], receipts: [{ id: "rc-1", date: "2026-09-13", location: WAREHOUSE, challan: "PSI/DC/8841", note: "", lines: [{ lineId: "po94-1", quantity: 25, serials: [] }] }], sentAt: "06 Sep 2026", activities: [{ title: "Received 25 of Vacuum seal kit", meta: "13 Sep 2026 · Priya Shah", tone: "received" }, { title: "Sent to Precision Systems India", meta: "06 Sep 2026 · Arun Kumar", tone: "sent" }] },
+    { id: "PO-24093", number: "PO-24093", vendor: "Optika Instruments", contact: "Farah Sheikh", vendorGstin: "24AABCO4455N1ZV", vendorState: "Gujarat", vendorAddress: "9, GIDC Vatva, Ahmedabad, Gujarat 382445", paymentTerms: "Net 45", tdsSection: "194Q", tdsRate: 0.1, orderDate: "2026-09-12", expectedDate: "2026-10-05", status: "Draft", owner: "Priya Shah", deliveryAddress: WAREHOUSE, freightCharges: 0, notes: "Quote confirmed over email on 11 Sep.", linkedOrder: "", items: [{ id: "po93-1", item: "Optical Microscope MX-5", description: "Optical microscope with 5 MP imaging", hsn: "9011", quantity: 2, rate: 168000, gst: 18, tracked: true, received: 0, serials: [] }], receipts: [], activities: [{ title: "Draft created", meta: "12 Sep 2026 · Priya Shah", tone: "system" }] },
+    { id: "PO-24092", number: "PO-24092", vendor: "Nanotech Supplies", contact: "Divya Krishnan", vendorGstin: "33AAGCN7781K1ZP", vendorState: "Tamil Nadu", vendorAddress: "5, Ambattur Industrial Estate, Chennai, Tamil Nadu 600058", paymentTerms: "Net 15", tdsSection: "—", tdsRate: 0, orderDate: "2026-09-15", expectedDate: "2026-09-25", status: "Draft", owner: "Arun Kumar", deliveryAddress: WAREHOUSE, freightCharges: 0, notes: "", linkedOrder: "", items: [{ id: "po92-1", item: "O-ring set — 25 pack", description: "Nitrile O-ring assortment, 25 pack", hsn: "4016", quantity: 15, rate: 1450, gst: 18, received: 0, serials: [] }], receipts: [], activities: [{ title: "Draft created", meta: "15 Sep 2026 · Arun Kumar", tone: "system" }] },
+    { id: "PO-24091", number: "PO-24091", vendor: "Precision Systems India", contact: "Vikram Joshi", vendorGstin: "27AACCP1234F1Z8", vendorState: "Maharashtra", vendorAddress: "Plot 22, Bhosari MIDC, Pune, Maharashtra 411026", paymentTerms: "Net 30", tdsSection: "194C", tdsRate: 1, orderDate: "2026-08-26", expectedDate: "2026-09-02", status: "Received", owner: "Priya Shah", deliveryAddress: WAREHOUSE, freightCharges: 0, notes: "", linkedOrder: "", items: [{ id: "po91-1", item: "Vacuum seal kit", description: "Vacuum seal maintenance kit", hsn: "8484", quantity: 20, rate: 9800, gst: 18, stockId: "SP-033", received: 20, serials: [] }], receipts: [{ id: "rc-0", date: "2026-09-02", location: WAREHOUSE, challan: "PSI/DC/8790", note: "", lines: [{ lineId: "po91-1", quantity: 20, serials: [] }] }], sentAt: "26 Aug 2026", activities: [{ title: "All items received", meta: "02 Sep 2026 · Priya Shah", tone: "received" }, { title: "Sent to Precision Systems India", meta: "26 Aug 2026 · Priya Shah", tone: "sent" }] },
   ],
   expenses: [
     { id: "EXP-001", engineer: "Nikhil Rao", submittedBy: "Nikhil Rao", expenseDate: "2026-09-12", category: "Travel", amount: 4500, description: "Cab fare and fuel for the Whitefield calibration visit.", billFiles: ["travel_receipt_0912.jpg"], jobId: "JOB-1041", status: "Approved", submittedAt: "12 Sep 2026 · 06:40 PM", history: [{ action: "Submitted", at: "12 Sep 2026 · 06:40 PM", by: "Nikhil Rao" }, { action: "Approved", at: "13 Sep 2026 · 10:05 AM", by: "Arun Kumar" }] },
@@ -1157,48 +1148,42 @@ let state: Store = {
     { id: "EXP-003", engineer: "Sandeep Kulkarni", submittedBy: "Sandeep Kulkarni", expenseDate: "2026-09-14", category: "Parking / Toll", amount: 800, description: "Toll both ways, Pune–Bengaluru for the Aster Pharma rental delivery.", billFiles: ["toll_receipt.jpg"], jobId: "JOB-1038", status: "Approved", submittedAt: "14 Sep 2026 · 07:50 PM", history: [{ action: "Submitted", at: "14 Sep 2026 · 07:50 PM", by: "Sandeep Kulkarni" }, { action: "Approved", at: "15 Sep 2026 · 09:20 AM", by: "Arun Kumar" }] },
     { id: "EXP-004", engineer: "Anitha Raj", submittedBy: "Anitha Raj", expenseDate: "2026-09-08", category: "Accommodation", amount: 2600, description: "One night stay for the two-day Tera Research visit.", billFiles: ["hotel_invoice.pdf"], status: "Approved", submittedAt: "09 Sep 2026 · 08:30 AM", history: [{ action: "Submitted", at: "09 Sep 2026 · 08:30 AM", by: "Anitha Raj" }, { action: "Approved", at: "09 Sep 2026 · 04:10 PM", by: "Arun Kumar" }] },
     { id: "EXP-005", engineer: "Meera Iyer", submittedBy: "Meera Iyer", expenseDate: "2026-09-15", category: "Materials", amount: 450, description: "Cable ties and cleaning solvent bought locally for the site visit.", billFiles: [], billMissingReason: "Vendor is a small local hardware shop and did not issue a printed receipt; paid by UPI.", status: "Pending Approval", submittedAt: "15 Sep 2026 · 05:45 PM", history: [{ action: "Submitted", at: "15 Sep 2026 · 05:45 PM", by: "Meera Iyer" }] },
-    { id: "EXP-006", engineer: "Rahul Desai", submittedBy: "Rahul Desai", expenseDate: "2026-09-13", category: "Travel", amount: 1200, description: "Cab from the airport to the customer site.", billFiles: ["cab_receipt.jpg"], status: "Changes Requested", submittedAt: "13 Sep 2026 · 09:10 PM", history: [{ action: "Submitted", at: "13 Sep 2026 · 09:10 PM", by: "Rahul Desai" }, { action: "Sent back for changes", at: "14 Sep 2026 · 11:00 AM", by: "Priya Shah", reason: "₹1,200 looks high for an airport cab — please confirm the distance or attach a clearer receipt." }] },
+    { id: "EXP-006", engineer: "Rahul Desai", submittedBy: "Rahul Desai", expenseDate: "2026-09-13", category: "Travel", amount: 1200, description: "Cab from the airport to the customer site.", billFiles: ["cab_receipt.jpg"], status: "Rejected", submittedAt: "13 Sep 2026 · 09:10 PM", history: [{ action: "Submitted", at: "13 Sep 2026 · 09:10 PM", by: "Rahul Desai" }, { action: "Rejected", at: "14 Sep 2026 · 11:00 AM", by: "Priya Shah", reason: "₹1,200 looks high for an airport cab — please confirm the distance or attach a clearer receipt, then submit it as a new expense." }] },
     { id: "EXP-007", engineer: "Kiran Joseph", submittedBy: "Kiran Joseph", expenseDate: "2026-09-16", category: "Food", amount: 550, description: "Team lunch with the customer's QA team.", billFiles: ["lunch_bill_a.jpg"], status: "Pending Approval", submittedAt: "16 Sep 2026 · 01:30 PM", history: [{ action: "Submitted", at: "16 Sep 2026 · 01:30 PM", by: "Kiran Joseph" }] },
     { id: "EXP-008", engineer: "Kiran Joseph", submittedBy: "Kiran Joseph", expenseDate: "2026-09-16", category: "Food", amount: 550, description: "Lunch during the site visit.", billFiles: ["lunch_bill_b.jpg"], status: "Pending Approval", submittedAt: "16 Sep 2026 · 01:35 PM", history: [{ action: "Submitted", at: "16 Sep 2026 · 01:35 PM", by: "Kiran Joseph" }] },
   ],
   advancePayments: [
-    { id: "ADV-001", engineer: "Nikhil Rao", type: "Advance Paid", amount: 5000, date: "2026-09-10", mode: "Cash", jobId: undefined, notes: "Advance for the week's Whitefield and Biocon visits.", recordedBy: "Priya Shah", recordedAt: "10 Sep 2026 · 09:00 AM", status: "Posted" },
-    { id: "ADV-002", engineer: "Anitha Raj", type: "Advance Paid", amount: 2000, date: "2026-09-05", mode: "UPI", reference: "UPI/440210", notes: "Advance for the Tera Research trip.", recordedBy: "Priya Shah", recordedAt: "05 Sep 2026 · 10:15 AM", status: "Posted" },
-    { id: "ADV-003", engineer: "Sandeep Kulkarni", type: "Advance Paid", amount: 500, date: "2026-09-01", mode: "Cash", notes: "Recorded against the wrong engineer by mistake.", recordedBy: "Priya Shah", recordedAt: "01 Sep 2026 · 11:00 AM", status: "Reversed", reversedReason: "Advance was actually paid to Nikhil Rao, not Sandeep Kulkarni — recorded against the wrong person.", reversedBy: "Arun Kumar", reversedAt: "02 Sep 2026 · 09:30 AM" },
+    { id: "ADV-001", engineer: "Nikhil Rao", type: "Advance Paid", amount: 5000, date: "2026-09-10", mode: "Cash", jobId: undefined, notes: "Advance for the week's Whitefield and Biocon visits.", recordedBy: "Priya Shah", recordedAt: "10 Sep 2026 · 09:00 AM" },
+    { id: "ADV-002", engineer: "Anitha Raj", type: "Advance Paid", amount: 2000, date: "2026-09-05", mode: "UPI", reference: "UPI/440210", notes: "Advance for the Tera Research trip.", recordedBy: "Priya Shah", recordedAt: "05 Sep 2026 · 10:15 AM" },
   ],
 
   customerReceipts: [
-    { id: "RCP-001", customer: "Tera Research", date: "2026-09-12", amount: 700000, mode: "Bank", reference: "HDFC/NEFT/99821", clearance: "Cleared", allocations: [{ invoiceId: "INV-2026-0116", amount: 700000 }], recordedBy: "Arun Kumar", recordedAt: "12 Sep 2026 · 10:20 AM", status: "Posted" },
-    { id: "RCP-002", customer: "Helix Labs", date: "2026-09-09", amount: 156600, mode: "UPI", reference: "UPI/442198", clearance: "Cleared", allocations: [{ invoiceId: "INV-2026-0115", amount: 156600 }], recordedBy: "Arun Kumar", recordedAt: "09 Sep 2026 · 09:15 AM", status: "Posted" },
+    { id: "RCP-001", customer: "Tera Research", date: "2026-09-12", amount: 700000, mode: "Bank", reference: "HDFC/NEFT/99821", allocations: [{ invoiceId: "INV-2026-0116", amount: 700000 }], recordedBy: "Arun Kumar", recordedAt: "12 Sep 2026 · 10:20 AM" },
+    { id: "RCP-002", customer: "Helix Labs", date: "2026-09-09", amount: 156600, mode: "UPI", reference: "UPI/442198", allocations: [{ invoiceId: "INV-2026-0115", amount: 156600 }], recordedBy: "Arun Kumar", recordedAt: "09 Sep 2026 · 09:15 AM" },
     // Received more than the one open invoice needed — the extra stays visible as Nova's advance.
-    { id: "RCP-003", customer: "Nova Instruments", date: "2026-09-14", amount: 300000, mode: "Bank", reference: "NOVA/NEFT/7724", clearance: "Cleared", allocations: [{ invoiceId: "INV-2026-0118", amount: 253700 }], recordedBy: "Priya Shah", recordedAt: "14 Sep 2026 · 03:40 PM", status: "Posted" },
-    // A cheque banked but not yet cleared — allocated so it can't be recorded twice, but it does
-    // not reduce the invoice balance or count as collected until it clears.
-    { id: "RCP-004", customer: "Arka Diagnostics", date: "2026-09-16", amount: 87320, mode: "Cheque", reference: "CHQ-004821", clearance: "Pending Clearance", allocations: [{ invoiceId: "INV-2026-0117", amount: 87320 }], recordedBy: "Priya Shah", recordedAt: "16 Sep 2026 · 11:05 AM", status: "Posted" },
-    { id: "RCP-005", customer: "Arka Diagnostics", date: "2026-09-03", amount: 20000, mode: "Cash", clearance: "Cleared", allocations: [], recordedBy: "Priya Shah", recordedAt: "03 Sep 2026 · 04:20 PM", status: "Reversed", reversedReason: "Recorded against the wrong customer by mistake — should have been Vector Bio Labs.", reversedBy: "Arun Kumar", reversedAt: "04 Sep 2026 · 09:10 AM" },
+    { id: "RCP-003", customer: "Nova Instruments", date: "2026-09-14", amount: 300000, mode: "Bank", reference: "NOVA/NEFT/7724", allocations: [{ invoiceId: "INV-2026-0118", amount: 253700 }], recordedBy: "Priya Shah", recordedAt: "14 Sep 2026 · 03:40 PM" },
+    { id: "RCP-004", customer: "Arka Diagnostics", date: "2026-09-16", amount: 87320, mode: "Cheque", reference: "CHQ-004821", allocations: [{ invoiceId: "INV-2026-0117", amount: 87320 }], recordedBy: "Priya Shah", recordedAt: "16 Sep 2026 · 11:05 AM" },
   ],
   customerTds: [
-    // Invoice ₹1,71,100; ₹1,56,600 received by UPI; ₹14,500 TDS recorded — balance ₹0, but the
-    // deduction is still awaiting the certificate, so verification stays visible either way.
-    { id: "TDS-001", invoiceId: "INV-2026-0115", customer: "Helix Labs", amount: 14500, date: "2026-09-09", reference: "Awaiting Form 16A", verification: "Pending", recordedBy: "Arun Kumar", recordedAt: "09 Sep 2026 · 09:20 AM", status: "Posted" },
+    // Invoice ₹1,71,100; ₹1,56,600 received by UPI; ₹14,500 TDS recorded — balance ₹0.
+    { id: "TDS-001", invoiceId: "INV-2026-0115", customer: "Helix Labs", amount: 14500, date: "2026-09-09", reference: "Awaiting Form 16A", recordedBy: "Arun Kumar", recordedAt: "09 Sep 2026 · 09:20 AM" },
   ],
 
   payables: [
-    // A received PO does not create a payable by itself — this bill was entered explicitly,
-    // citing PO-24091 for reference, once the vendor's actual invoice arrived.
-    { id: "BILL-PSI", number: "PSI/INV/2026/551", payee: "Precision Systems India", category: "Supplier Purchase", billDate: "2026-09-02", dueDate: "2026-10-02", amount: 231280, description: "Vacuum seal kit, 20 units", poRef: "PO-24091", createdBy: "Arun Kumar", createdAt: "14 Sep 2026 · 11:00 AM", status: "Posted" },
-    { id: "BILL-OFC", number: "BLS/INV/2026/220", payee: "Bengaluru Lab Spares", category: "Supplier Purchase", billDate: "2026-09-05", dueDate: "2026-10-05", amount: 35400, description: "Consumables — probe tips and lens cloth", createdBy: "Priya Shah", createdAt: "05 Sep 2026 · 03:10 PM", status: "Posted" },
-    { id: "BILL-OTH", payee: "Bruker Services", category: "Other", billDate: "2026-09-08", dueDate: "2026-09-30", amount: 42000, description: "Annual AFM probe station service contract", createdBy: "Arun Kumar", createdAt: "08 Sep 2026 · 10:00 AM", status: "Posted" },
-    { id: "BILL-WORK", payee: "WeWork", category: "Office Expense", billDate: "2026-09-01", dueDate: "2026-09-25", amount: 18000, description: "Shared desk seats, September", createdBy: "Priya Shah", createdAt: "01 Sep 2026 · 09:00 AM", status: "Posted" },
-    { id: "BILL-MISTAKE", number: "NS/INV/2026/090", payee: "Nanotech Supplies", category: "Supplier Purchase", billDate: "2026-08-28", dueDate: "2026-09-10", amount: 15000, description: "O-ring assortment", createdBy: "Priya Shah", createdAt: "28 Aug 2026 · 02:00 PM", status: "Posted" },
+    // The vendor bill for PO-24091, created once the vendor's actual invoice arrived, citing
+    // PO-24091 for reference and carrying the vendor's TDS rate/section.
+    { id: "BILL-PSI", number: "PSI/INV/2026/551", payee: "Precision Systems India", category: "Supplier Purchase", billDate: "2026-09-02", dueDate: "2026-10-02", amount: 231280, description: "Vacuum seal kit, 20 units", poRef: "PO-24091", tdsRate: 1, tdsSection: "194C", createdBy: "Arun Kumar", createdAt: "14 Sep 2026 · 11:00 AM" },
+    { id: "BILL-OFC", number: "BLS/INV/2026/220", payee: "Bengaluru Lab Spares", category: "Supplier Purchase", billDate: "2026-09-05", dueDate: "2026-10-05", amount: 35400, description: "Consumables — probe tips and lens cloth", createdBy: "Priya Shah", createdAt: "05 Sep 2026 · 03:10 PM" },
+    { id: "BILL-OTH", payee: "Bruker Services", category: "Other", billDate: "2026-09-08", dueDate: "2026-09-30", amount: 42000, description: "Annual AFM probe station service contract", createdBy: "Arun Kumar", createdAt: "08 Sep 2026 · 10:00 AM" },
+    { id: "BILL-WORK", payee: "WeWork", category: "Office Expense", billDate: "2026-09-01", dueDate: "2026-09-25", amount: 18000, description: "Shared desk seats, September", createdBy: "Priya Shah", createdAt: "01 Sep 2026 · 09:00 AM" },
+    { id: "BILL-MISTAKE", number: "NS/INV/2026/090", payee: "Nanotech Supplies", category: "Supplier Purchase", billDate: "2026-08-28", dueDate: "2026-09-10", amount: 15000, description: "O-ring assortment", createdBy: "Priya Shah", createdAt: "28 Aug 2026 · 02:00 PM" },
   ],
   supplierPayments: [
     // Marked "Already paid" when the bill was entered — one bill, one linked payment.
-    { id: "SP-001", billId: "BILL-OFC", date: "2026-09-05", amount: 35400, mode: "Cash", recordedBy: "Priya Shah", recordedAt: "05 Sep 2026 · 03:10 PM", notes: "Recorded via \"Already paid\" at bill entry.", status: "Posted" },
+    { id: "SP-001", billId: "BILL-OFC", date: "2026-09-05", amount: 35400, mode: "Cash", recordedBy: "Priya Shah", recordedAt: "05 Sep 2026 · 03:10 PM", notes: "Recorded via \"Already paid\" at bill entry." },
     // Partial payment, with a supplier TDS deduction recorded for audit — not a statement that
     // it has been deposited or that the statutory obligation is complete.
-    { id: "SP-002", billId: "BILL-OTH", date: "2026-09-12", amount: 20000, mode: "Bank", reference: "BRK/NEFT/331", tds: 2000, recordedBy: "Arun Kumar", recordedAt: "12 Sep 2026 · 04:00 PM", status: "Posted" },
-    { id: "SP-003", billId: "BILL-MISTAKE", date: "2026-09-08", amount: 15000, mode: "Cash", recordedBy: "Priya Shah", recordedAt: "08 Sep 2026 · 09:40 AM", status: "Reversed", reversedReason: "Recorded against the wrong vendor bill by mistake — payment was actually for a different Nanotech Supplies invoice.", reversedBy: "Arun Kumar", reversedAt: "09 Sep 2026 · 10:00 AM" },
+    { id: "SP-002", billId: "BILL-OTH", date: "2026-09-12", amount: 20000, mode: "Bank", reference: "BRK/NEFT/331", tds: 2000, recordedBy: "Arun Kumar", recordedAt: "12 Sep 2026 · 04:00 PM" },
   ],
 
   leads: [
@@ -1208,6 +1193,20 @@ let state: Store = {
     { id: "LD-1045", name: "Sana Iyer", company: "Tera Research", phone: "+91 97040 10888", email: "sana@teraresearch.com", city: "Chennai", source: "Referral", enquiry: "Surface profilometer demo for semiconductor applications.", stage: "Won", assigned: "Priya Shah", interestedIn: "Surface profilometer", value: "₹ 12.2 L", decision: "2026-09-10", customer: { name: "Tera Research", code: "CUS-2037" } },
   ],
   quotes: initialQuotes,
+  customers: customerMaster,
+  // Orders exist only for quotations accepted since this feature shipped — but three quotes
+  // in the seed were already "Accepted" before that, so their orders are backfilled here with
+  // the same shape acceptQuote() produces, rather than leaving Orders empty out of the box.
+  customerOrders: [
+    { id: "ORD-2026-0498", number: "ORD-2026-0498", customer: "Arka Diagnostics", contact: "Meera Nair", customerGstin: "29AAECA5512M1Z3", customerState: "Karnataka", billingAddress: "44, Peenya Industrial Area, Bengaluru, Karnataka 560058", shippingAddress: "44, Peenya Industrial Area, Bengaluru, Karnataka 560058", fromQuote: "QT-2026-0835 R1", orderDate: "2026-09-12", orderType: "Sale", poNumber: "ARK/PO/2026/077", poDate: "2026-09-12", items: [{ id: "arka-1", item: "Optical Microscope MX-5", description: "Optical microscope with 5 MP imaging", hsn: "9011", quantity: 1, unit: "Nos", rate: 215000, discount: 0, gst: 18, inStock: true }, { id: "arka-2", item: "Vacuum seal kit", description: "Vacuum seal maintenance kit", hsn: "8484", quantity: 2, unit: "Set", rate: 12400, discount: 0, gst: 18, inStock: true }], status: "Open", activities: [{ title: "Order created from QT-2026-0835 R1", meta: "12 Sep 2026 · Arun Kumar", tone: "system" }] },
+    { id: "ORD-2026-0499", number: "ORD-2026-0499", customer: "Helix Labs", contact: "Kiran Rao", customerGstin: "36AABCH2119P1Z5", customerState: "Telangana", billingAddress: "Plot 7, Genome Valley, Hyderabad, Telangana 500078", shippingAddress: "Plot 7, Genome Valley, Hyderabad, Telangana 500078", fromQuote: "QT-2026-0831 R1", orderDate: "2026-09-09", orderType: "Sale", poNumber: "HL/PO/2026/451", poDate: "2026-09-09", items: [{ id: "helix-a-1", item: "AFM probe tips — 10 pack", description: "Consumable AFM probe tips, pack of 10", hsn: "9012", quantity: 6, unit: "Pack", rate: 18500, discount: 0, gst: 18, inStock: true }], status: "Open", activities: [{ title: "Order created from QT-2026-0831 R1", meta: "09 Sep 2026 · Priya Shah", tone: "system" }] },
+    { id: "ORD-2026-0500", number: "ORD-2026-0500", customer: "Tera Research", contact: "Sana Iyer", customerGstin: "33AABCT6281H1ZA", customerState: "Tamil Nadu", billingAddress: "21, OMR Road, Thoraipakkam, Chennai, Tamil Nadu 600097", shippingAddress: "Surface Science Lab, OMR Road, Chennai, Tamil Nadu 600097", fromQuote: "QT-2026-0827 R1", orderDate: "2026-09-10", orderType: "Sale", poNumber: "TR/PO/2026/119", poDate: "2026-09-10", installationNeeded: true, items: [{ id: "tera-1", item: "Surface Profilometer", description: "Surface profilometer, standard measurement package", hsn: "9027", quantity: 1, unit: "Nos", rate: 1090000, discount: 0, gst: 18, inStock: false }, { id: "tera-2", item: "On-site commissioning", description: "Installation and commissioning", hsn: "9987", quantity: 1, unit: "Job", rate: 130000, discount: 0, gst: 18, inStock: false }], status: "Open", activities: [{ title: "Order created from QT-2026-0827 R1", meta: "10 Sep 2026 · Priya Shah", tone: "system" }, { title: "Invoice INV-2026-0116 created", meta: "10 Sep 2026 · Priya Shah", tone: "system" }] },
+    { id: "ORD-2026-0501", number: "ORD-2026-0501", customer: "Cloudnine Hospitals", contact: "Dr. Nisha Rao", customerGstin: "29AAECC7731K1ZU", customerState: "Karnataka", billingAddress: "Old Airport Road, Bengaluru, Karnataka 560017", shippingAddress: "OT & Infection Control, Cloudnine Hospitals, Bengaluru, Karnataka 560017", fromQuote: "QT-2026-0840 R1", orderDate: "2026-09-15", orderType: "Rental", items: [{ id: "cloudnine-1", item: "Airborne Particle Counter", description: "Airborne particle counter — monthly rental for OT monitoring", hsn: "9027", quantity: 1, unit: "Nos", rate: 6500, discount: 0, gst: 18, inStock: true }], status: "Open", activities: [{ title: "Order created from QT-2026-0840 R1", meta: "15 Sep 2026 · Arun Kumar", tone: "system" }] },
+  ],
+  deliveryChallans: [],
+  rentals: [
+    { id: "RENT-0241", number: "RENT-0241", orderRef: "", equipmentId: "INS-0042", customer: "Aster Pharma", siteId: "SITE-07", startDate: "2026-08-15", monthlyRate: 18500, expectedReturnDate: "2026-09-24", status: "Active", activities: [{ title: "Issued to Aster Pharma", meta: "15 Aug 2026 · Arun Kumar", tone: "system" }] },
+  ],
 };
 
 // Untouched seed snapshot, kept for "Reset demo data" — captured before any persisted data
@@ -1247,7 +1246,7 @@ export function updateStore(change: (current: Store) => Partial<Store>) {
 /** Quantity still expected from POs that have been placed but not fully delivered. */
 export function onOrderFor(stockId: string, orders: PurchaseOrder[]) {
   return orders
-    .filter((order) => order.status === "Sent" || order.status === "Partly received" || order.status === "Awaiting approval")
+    .filter((order) => order.status === "Sent" || order.status === "Partly received")
     .flatMap((order) => order.items)
     .filter((line) => line.stockId === stockId)
     .reduce((total, line) => total + Math.max(line.quantity - line.received, 0), 0);

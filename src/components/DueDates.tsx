@@ -1,10 +1,11 @@
 import { useMemo, useState } from "react";
 import { ALERT_SETTINGS, APPROVER, CAL_LAB, ENGINEER, WAREHOUSE, dateIso, dayDifference, money, prettyDate, stamp } from "./erpMasters";
-import { COMPANY, JOB_SETTINGS, siteById, totalsFor, vendorMaster } from "./erpMasters";
-import { balanceOf, invoiceTotals, nextDueFor, openJobFor, paidSoFar, recordCustomerReceipt, statutoryDues, updateStore, useErpStore, type Job, type PaymentMode, type PaymentRecord, type StockMove } from "./erpStore";
+import { siteById, vendorMaster } from "./erpMasters";
+import { balanceOf, invoiceTotals, nextDueFor, openJobFor, paidSoFar, statutoryDues, updateStore, useErpStore, type Job, type PaymentMode, type PaymentRecord, type StockMove } from "./erpStore";
 import { Overlay, Pagination, useTablePage } from "./ErpUi";
+import { RecordReceipt } from "./Accounts";
 
-export type DueType = "Service" | "Master" | "Fleet" | "Payment" | "VendorBill" | "Bill" | "Statutory";
+export type DueType = "Service" | "Master" | "Fleet" | "Payment" | "Bill" | "Statutory";
 type DueTab = "service" | "equipment" | "money";
 export type DueItem = {
   id: string;
@@ -15,7 +16,7 @@ export type DueItem = {
   amount?: number;
   owner: string;
   lead: number;
-  recordKind: "instrument" | "master" | "equipment" | "invoice" | "bill" | "vendorbill" | "statutory";
+  recordKind: "instrument" | "master" | "equipment" | "invoice" | "bill" | "statutory";
   recordId: string;
   site?: string;
   city?: string;
@@ -27,9 +28,8 @@ export type DueItem = {
   note?: string;
 };
 
-const TAB_OF: Record<DueType, DueTab> = { Service: "service", Master: "equipment", Fleet: "equipment", Payment: "money", VendorBill: "money", Bill: "money", Statutory: "money" };
-const GROUP_OF: Record<DueType, string> = { Service: "service", Master: "masters", Fleet: "fleet", Payment: "collect", VendorBill: "pay", Bill: "pay", Statutory: "pay" };
-const TERM_DAYS: Record<string, number> = { "Net 15": 15, "Net 30": 30, "Net 45": 45, "Due on receipt": 0 };
+const TAB_OF: Record<DueType, DueTab> = { Service: "service", Master: "equipment", Fleet: "equipment", Payment: "money", Bill: "money", Statutory: "money" };
+const GROUP_OF: Record<DueType, string> = { Service: "service", Master: "masters", Fleet: "fleet", Payment: "collect", Bill: "pay", Statutory: "pay" };
 const addDays = (from: string, days: number) => { const date = new Date(`${from}T12:00`); date.setDate(date.getDate() + days); return dateIso(date); };
 const addMonths = (from: string, months: number) => { const date = new Date(`${from}T12:00`); date.setMonth(date.getMonth() + months); return dateIso(date); };
 
@@ -91,17 +91,8 @@ export function buildDueItems(store: ReturnType<typeof useErpStore>): DueItem[] 
     owner: APPROVER, lead: ALERT_SETTINGS.leadDays.Payment, recordKind: "invoice", recordId: invoice.id,
   }));
 
-  // Vendor bills fall out of purchase orders that have been received.
-  store.orders.filter((order) => order.status === "Received" && !order.billPaid).forEach((order) => {
-    const totals = totalsFor(order.items, order.vendorState === COMPANY.state, 0, order.freightCharges);
-    const tds = Math.round(totals.taxable * order.tdsRate / 100);
-    items.push({
-      id: `vb-${order.id}`, type: "VendorBill", title: `${order.vendor} — ${order.vendorBill ?? order.number}`,
-      party: order.vendor, date: addDays(order.orderDate, TERM_DAYS[order.paymentTerms] ?? 30),
-      amount: totals.grandTotal - tds, owner: APPROVER, lead: ALERT_SETTINGS.leadDays.VendorBill,
-      recordKind: "vendorbill", recordId: order.id, note: order.tdsRate ? `After TDS ${order.tdsRate}%` : undefined,
-    });
-  });
+  // A received PO's vendor bill is a Payable in Accounts now, not a due item here — see
+  // PurchaseOrders.tsx and Accounts.tsx's payableFromPurchaseOrder.
 
   store.bills.forEach((bill) => items.push({
     id: `bill-${bill.id}`, type: "Bill", title: `${bill.name} — ${bill.vendor}`,
@@ -133,7 +124,7 @@ function primaryLabel(item: DueItem) {
 type Store = ReturnType<typeof useErpStore>;
 type SnoozeCtx = { today: string; snoozeFor: string | null; setSnoozeFor: (id: string | null) => void; snooze: (item: DueItem, days: number) => void };
 
-export default function DueDates({ isEngineer = false }: { isEngineer?: boolean }) {
+export default function DueDates({ isEngineer = false, openInvoice, openJob }: { isEngineer?: boolean; openInvoice?: (invoiceId: string) => void; openJob?: (jobId: string) => void }) {
   const store = useErpStore();
   const [tab, setTab] = useState<DueTab>("service");
   const [picked, setPicked] = useState<string[]>([]);
@@ -192,7 +183,7 @@ export default function DueDates({ isEngineer = false }: { isEngineer?: boolean 
         id: number, number, type: "Calibration" as const, customer: first.customer, siteId: first.siteId,
         instrumentIds: instruments.map((entry) => entry.id), stockIds: [],
         description: `Calibration of ${instruments.length} instrument${instruments.length === 1 ? "" : "s"}.`,
-        doneAt: "Customer site" as const, scheduledDate: dateIso(), slot: JOB_SETTINGS.defaultSlot, hours: instruments.length * 2,
+        doneAt: "Site visit" as const, scheduledDate: dateIso(), hours: instruments.length * 2,
         status: "Unassigned" as const, expectedSpares: [], usedSpares: [], results: [], travelNotes: "", photos: 0,
         activities: [{ title: `Job created from Due Dates for ${instruments.length} instrument${instruments.length === 1 ? "" : "s"}`, meta: stamp(), tone: "system" as const }],
       }, ...current.jobs] };
@@ -237,7 +228,7 @@ export default function DueDates({ isEngineer = false }: { isEngineer?: boolean 
           <div><h3>{group.title}</h3><p>{group.blurb}</p></div>
           {group.money ? <div className="due-group-total"><span>{group.totalLabel}</span><b>{money(total)}</b></div> : <span className="due-group-count">{groupRows.length}</span>}
         </div>
-        {group.key === "service" && <ServiceTable rows={groupRows} open={setOpening} act={setActing} picked={picked} setPicked={setPicked} snoozeCtx={snoozeCtx} />}
+        {group.key === "service" && <ServiceTable rows={groupRows} open={setOpening} act={setActing} picked={picked} setPicked={setPicked} snoozeCtx={snoozeCtx} openJob={openJob} />}
         {group.key === "fleet" && <FleetTable rows={groupRows} open={setOpening} act={setActing} snoozeCtx={snoozeCtx} />}
         {group.key === "collect" && <CollectTable rows={groupRows} open={setOpening} act={setActing} snoozeCtx={snoozeCtx} remind={remind} />}
         {group.key === "pay" && <PayTable rows={groupRows} open={setOpening} act={setActing} snoozeCtx={snoozeCtx} />}
@@ -245,8 +236,10 @@ export default function DueDates({ isEngineer = false }: { isEngineer?: boolean 
     })}
     {!rows.length && <div className="settings-empty due-empty"><b>Nothing due. Everything is up to date.</b><p>{window_ === "all" && !search ? `New ${isService ? "customer instruments coming up for calibration" : activeTab === "equipment" ? "calibrations for our own kit" : "payments and bills"} appear here on their own.` : "Nothing matches these filters. Clear the search or pick another card."}</p></div>}
 
-    {acting && <ActionSheet item={acting} store={store} close={() => setActing(null)} flash={flash} />}
-    {opening && <RecordDrawer item={opening} store={store} close={() => setOpening(null)} />}
+    {acting && (acting.type === "Payment"
+      ? <RecordReceipt store={store} customer={store.invoices.find((invoice) => invoice.id === acting.recordId)?.customer} presetInvoiceId={acting.recordId} close={() => setActing(null)} flash={flash} />
+      : <ActionSheet item={acting} store={store} close={() => setActing(null)} flash={flash} />)}
+    {opening && <RecordDrawer item={opening} store={store} close={() => setOpening(null)} openInvoice={openInvoice} openJob={openJob} />}
     {toast && <div className="settings-toast" role="status">✓ {toast}</div>}
   </section>;
 }
@@ -280,7 +273,7 @@ function rowClass(item: DueItem, today: string, snoozed: Record<string, string>)
 }
 
 /* ─── Customer instruments due for calibration ─── */
-function ServiceTable({ rows, open, act, picked, setPicked, snoozeCtx }: { rows: DueItem[]; open: (item: DueItem) => void; act: (item: DueItem) => void; picked: string[]; setPicked: (updater: (all: string[]) => string[]) => void; snoozeCtx: SnoozeCtx }) {
+function ServiceTable({ rows, open, act, picked, setPicked, snoozeCtx, openJob }: { rows: DueItem[]; open: (item: DueItem) => void; act: (item: DueItem) => void; picked: string[]; setPicked: (updater: (all: string[]) => string[]) => void; snoozeCtx: SnoozeCtx; openJob?: (jobId: string) => void }) {
   const { pageRows, page, setPage } = useTablePage(rows, `service|${rows.length}`);
   const allPicked = pageRows.length > 0 && pageRows.every((item) => picked.includes(item.id));
   return <><div className="erp-table-shell"><table className="erp-data-table due-table"><colgroup><col style={{ width: 44 }} /><col style={{ width: "26%" }} /><col style={{ width: "18%" }} /><col style={{ width: "13%" }} /><col style={{ width: "17%" }} /><col style={{ width: "9%" }} /><col style={{ width: "17%" }} /></colgroup><thead><tr>
@@ -291,7 +284,7 @@ function ServiceTable({ rows, open, act, picked, setPicked, snoozeCtx }: { rows:
     <td><button className="erp-record-link" onClick={() => open(item)}>{item.title}</button></td>
     <td><span>{item.party}</span>{item.site && <small>{item.site} · {item.city}</small>}</td>
     <td><DueCell date={item.date} /></td>
-    <td>{item.job ? <span className="due-job-chip">{item.job.number} · {item.job.status.toLowerCase()}{item.job.engineer ? ` · ${item.job.engineer}` : ""}</span> : <span className="due-nojob">No job yet</span>}</td>
+    <td>{item.job ? (openJob ? <button className="due-job-chip" onClick={() => openJob(item.job!.id)}>{item.job.number} · {item.job.status.toLowerCase()}{item.job.engineer ? ` · ${item.job.engineer}` : ""}</button> : <span className="due-job-chip">{item.job.number} · {item.job.status.toLowerCase()}{item.job.engineer ? ` · ${item.job.engineer}` : ""}</span>) : <span className="due-nojob">No job yet</span>}</td>
     <td>{item.owner}</td>
     <td><ActionCell item={item} act={act} snoozeCtx={snoozeCtx} extra={<button className="settings-link" onClick={() => act(item)}>Remind customer</button>} /></td>
   </tr>)}</tbody></table>{!rows.length && <p className="due-group-empty">Nothing here.</p>}</div><Pagination total={rows.length} page={page} onPage={setPage} /></>;
@@ -340,7 +333,6 @@ function ActionSheet({ item, store, close, flash }: { item: DueItem; store: Retu
   const today = dateIso();
   const unit = store.individuals.find((entry) => entry.id === item.recordId);
   const instrument = store.instruments.find((entry) => entry.id === item.recordId);
-  const invoice = store.invoices.find((entry) => entry.id === item.recordId);
   const bill = store.bills.find((entry) => entry.id === item.recordId);
 
   const [date, setDate] = useState(today);
@@ -376,15 +368,6 @@ function ActionSheet({ item, store, close, flash }: { item: DueItem; store: Retu
     updateStore((current) => ({ individuals: current.individuals.map((row) => row.id === unit!.id ? { ...row, rentalReturnDue: date } : row) }));
     close(); flash(`Rental extended to ${prettyDate(date)}.`);
   };
-  const recordPayment = () => {
-    const value = Number(amount) || 0;
-    if (value <= 0 || !invoice) return;
-    const receipt = { id: `RCP-${Date.now()}`, customer: invoice.customer, date, amount: value, mode, reference: reference.trim() || undefined, clearance: (mode === "Cheque" ? "Pending Clearance" : "Cleared") as "Pending Clearance" | "Cleared", allocations: [{ invoiceId: invoice.id, amount: value }], recordedBy: item.owner, recordedAt: stamp(), status: "Posted" as const };
-    updateStore((current) => recordCustomerReceipt(current, receipt));
-    close();
-    const remaining = balanceOf(invoice, [...store.customerReceipts, receipt], store.customerTds);
-    flash(`${money(value)} recorded against ${invoice.number}.${remaining > 0.005 ? ` ${money(remaining)} still due.` : " Nothing more is due."}${mode === "Cheque" ? " Pending clearance — won't count until it clears." : ""}`);
-  };
   const markBillPaid = () => {
     updateStore((current) => ({ bills: current.bills.map((row) => row.id === bill!.id ? { ...row, dueDate: addMonths(row.dueDate, 1) } : row) }));
     close(); flash(`${bill!.name} marked paid. Next one due ${prettyDate(addMonths(bill!.dueDate, 1))}.`);
@@ -396,7 +379,7 @@ function ActionSheet({ item, store, close, flash }: { item: DueItem; store: Retu
       return { jobs: [{
         id: number, number, type: "Calibration" as const, customer: instrument!.customer, siteId: instrument!.siteId,
         instrumentIds: [instrument!.id], stockIds: [], description: `Calibration of ${instrument!.name}.`,
-        doneAt: "Customer site" as const, scheduledDate: date, slot: JOB_SETTINGS.defaultSlot, hours: 2,
+        doneAt: "Site visit" as const, scheduledDate: date, hours: 2,
         status: "Unassigned" as const, expectedSpares: [], usedSpares: [], results: [], travelNotes: "", photos: 0,
         activities: [{ title: "Job created from Due Dates", meta: stamp(), tone: "system" as const }],
       }, ...current.jobs] };
@@ -423,7 +406,7 @@ function ActionSheet({ item, store, close, flash }: { item: DueItem; store: Retu
       return { jobs: [{
         id: number, number, type: "Calibration" as const, customer: "SPM Lab Solutions", siteId: "",
         instrumentIds: [], stockIds: [unit!.id], description: `In-house calibration of ${unit!.name}.`,
-        doneAt: "Our lab" as const, scheduledDate: date, slot: JOB_SETTINGS.defaultSlot, hours: 2,
+        doneAt: "In-lab" as const, scheduledDate: date, hours: 2,
         status: "Unassigned" as const, expectedSpares: [], usedSpares: [], results: [], travelNotes: "", photos: 0,
         activities: [{ title: "Internal calibration job created", meta: stamp(), tone: "system" as const }],
       }, ...current.jobs] };
@@ -438,7 +421,6 @@ function ActionSheet({ item, store, close, flash }: { item: DueItem; store: Retu
   const markPaid = () => {
     const record: PaymentRecord = { amount: Number(amount) || 0, date, mode, reference };
     if (record.amount <= 0) return;
-    if (item.type === "VendorBill") updateStore((current) => ({ orders: current.orders.map((order) => order.id === item.recordId ? { ...order, billPaid: record } : order) }));
     if (item.type === "Statutory") updateStore((current) => ({ statutoryPaid: { ...current.statutoryPaid, [item.recordId]: record } }));
     if (item.type === "Bill") updateStore((current) => ({ bills: current.bills.map((row) => row.id !== item.recordId ? row : { ...row, dueDate: addMonths(row.dueDate, 1), payments: [record, ...(row.payments ?? [])] }) }));
     close();
@@ -498,16 +480,6 @@ function ActionSheet({ item, store, close, flash }: { item: DueItem; store: Retu
       </div>
       <div className="invoice-payment-footer"><span>{route === "inhouse" ? "Goes to Jobs → Unassigned" : "Tracked until the certificate comes back"}</span><div><button className="settings-outline" onClick={close}>Cancel</button><button className="erp-action" onClick={route === "inhouse" ? calibrateInHouse : sendFleetOut}>{route === "inhouse" ? "Create job" : "Send out"}</button></div></div>
     </>;
-    if (item.type === "Payment") return <>
-      <p className="po-start-hint">Money still due on {invoice?.number}: <b>{money(item.balance ?? 0)}</b>. Part payments are fine.</p>
-      <div className="po-receive-grid">
-        <label><span>Date received</span><input type="date" value={date} onChange={(event) => setDate(event.target.value)} /></label>
-        <label><span>Amount received</span><input type="number" min="0" value={amount} onChange={(event) => setAmount(event.target.value)} /></label>
-        <label><span>How was it paid?</span><select value={mode} onChange={(event) => setMode(event.target.value as PaymentMode)}><option>Bank</option><option>UPI</option><option>Cheque</option><option>Cash</option></select></label>
-        <label><span>Reference number</span><input value={reference} onChange={(event) => setReference(event.target.value)} placeholder="UTR, cheque or UPI number" /></label>
-      </div>
-      <div className="invoice-payment-footer"><span>Recording {money(Number(amount) || 0)}</span><div><button className="settings-outline" onClick={close}>Cancel</button><button className="erp-action" disabled={(Number(amount) || 0) <= 0} onClick={recordPayment}>Save payment</button></div></div>
-    </>;
     // Everything on the "to pay" side records the same four things, so Accounts and Tally get it all.
     return <>
       <p className="po-start-hint">{item.title}{item.note ? ` · ${item.note}` : ""}.{item.type === "Bill" ? " Paying it creates next month's automatically." : ""}</p>
@@ -528,7 +500,7 @@ function ActionSheet({ item, store, close, flash }: { item: DueItem; store: Retu
   </section></Overlay>;
 }
 
-function RecordDrawer({ item, store, close }: { item: DueItem; store: ReturnType<typeof useErpStore>; close: () => void }) {
+function RecordDrawer({ item, store, close, openInvoice, openJob }: { item: DueItem; store: ReturnType<typeof useErpStore>; close: () => void; openInvoice?: (invoiceId: string) => void; openJob?: (jobId: string) => void }) {
   const unit = store.individuals.find((entry) => entry.id === item.recordId);
   const instrument = store.instruments.find((entry) => entry.id === item.recordId);
   const invoice = store.invoices.find((entry) => entry.id === item.recordId);
@@ -549,7 +521,7 @@ function RecordDrawer({ item, store, close }: { item: DueItem; store: ReturnType
         <div><dt>Serial</dt><dd>{instrument.serial}</dd></div>
         <div><dt>Interval</dt><dd>{instrument.intervalMonths} months</dd></div>
         <div><dt>Contact</dt><dd>{site?.contact}</dd></div>
-        <div className="invoice-fact-wide"><dt>Job</dt><dd>{item.job ? `${item.job.number} · ${item.job.status.toLowerCase()}${item.job.engineer ? ` · ${item.job.engineer}` : ""}` : "No job raised yet"}</dd></div>
+        <div className="invoice-fact-wide"><dt>Job</dt><dd>{item.job ? <>{openJob ? <button className="erp-record-link" onClick={() => openJob(item.job!.id)}>{item.job.number}</button> : <b>{item.job.number}</b>} · {item.job.status.toLowerCase()}{item.job.engineer ? ` · ${item.job.engineer}` : ""}</> : "No job raised yet"}</dd></div>
       </dl>
       <section className="stock-detail-section"><h3>Calibration history</h3>{instrument.history.length ? <div className="ci-history">{instrument.history.slice().sort((a, b) => b.date.localeCompare(a.date)).map((entry) => <div key={entry.id}><div><b>{prettyDate(entry.date)}</b><span>{entry.engineer} · {entry.jobNumber}</span></div><span className={`ci-result ci-result--${entry.result === "Fail" ? "fail" : "pass"}`}>{entry.result}</span>{entry.certificate && <button className="ci-cert">{entry.certificate}</button>}</div>)}</div> : <p className="stock-timeline-empty">No calibration recorded yet.</p>}</section>
     </>}
@@ -564,6 +536,7 @@ function RecordDrawer({ item, store, close }: { item: DueItem; store: ReturnType
       <section className="stock-detail-section"><h3>Movement history</h3>{moves.length ? <div className="stock-timeline">{moves.map((entry) => <div key={entry.id}><i /><p><b>{entry.action}</b><span>{entry.at} · {entry.who}</span><small>{entry.source} → {entry.destination} · <em>{entry.document}</em></small></p></div>)}</div> : <p className="stock-timeline-empty">No movements recorded yet.</p>}</section>
     </>}
     {invoice && <>
+      {openInvoice && <div className="stock-quick"><button className="settings-outline" onClick={() => { close(); openInvoice(invoice.id); }}>Open {invoice.number}</button></div>}
       <dl className="invoice-facts due-facts">
         <div><dt>Customer</dt><dd>{invoice.customer}</dd></div>
         <div><dt>Invoice date</dt><dd>{prettyDate(invoice.invoiceDate)}</dd></div>

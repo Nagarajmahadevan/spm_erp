@@ -1,11 +1,13 @@
 import { useMemo, useState } from "react";
 import spmLogo from "@/imports/SPM_Logo.png";
-import { APPROVAL_LIMIT, APPROVER, COMPANY, STOCK_LOCATIONS, WAREHOUSE, money, prettyDate, dateIso, dayDifference, lineValue, numberWords, stamp, stockCatalog, totalsFor, vendorMaster, type Quote } from "./erpMasters";
-import { applyReceiptToStock, nextEquipmentIds, onOrderFor, orderAfterReceipt, totalOf, updateStore, useErpStore, type Individual, type POActivity, type POLine, type POStatus, type PurchaseOrder, type Quantity, type Receipt } from "./erpStore";
+import { APPROVER, COMPANY, STOCK_LOCATIONS, WAREHOUSE, addDaysIso, money, prettyDate, dateIso, dayDifference, lineValue, numberWords, stamp, stockCatalog, totalsFor, vendorMaster } from "./erpMasters";
+import { addPayable, applyReceiptToStock, nextEquipmentIds, onOrderFor, orderAfterReceipt, payablePaymentStatus, totalOf, updateStore, useErpStore, type CustomerOrder, type Individual, type Payable, type POActivity, type POLine, type POStatus, type PurchaseOrder, type Quantity, type Receipt } from "./erpStore";
+import { payableFromPurchaseOrder } from "./Accounts";
 
 type DisplayStatus = POStatus | "Overdue";
-const filters: POStatus[] = ["Draft", "Awaiting approval", "Sent", "Partly received", "Received", "Cancelled"];
+const filters: POStatus[] = ["Draft", "Sent", "Partly received", "Received", "Cancelled"];
 const TERMS = ["Net 15", "Net 30", "Net 45", "Due on receipt"];
+const TERM_DAYS: Record<string, number> = { "Net 15": 15, "Net 30": 30, "Net 45": 45, "Due on receipt": 0 };
 
 const newLine = (): POLine => ({ id: `line-${Date.now()}-${Math.random().toString(16).slice(2)}`, item: "", description: "", hsn: "", quantity: 1, rate: 0, gst: 18, received: 0, serials: [] });
 const pendingOf = (line: POLine) => Math.max(line.quantity - line.received, 0);
@@ -29,25 +31,25 @@ function blockers(order: PurchaseOrder) {
   if (noHsn.length) list.push(`Add the HSN code for ${noHsn.join(", ")}.`);
   return list;
 }
-function blankOrder(number: string, items: POLine[], linkedQuote = ""): PurchaseOrder {
+function blankOrder(number: string, items: POLine[], linkedOrder = ""): PurchaseOrder {
   return {
     id: number, number, vendor: "", contact: "", vendorGstin: "", vendorState: COMPANY.state, vendorAddress: "",
     paymentTerms: "Net 30", tdsSection: "—", tdsRate: 0, orderDate: dateIso(), expectedDate: "", status: "Draft",
-    owner: APPROVER, deliveryAddress: WAREHOUSE, freightCharges: 0, notes: "", linkedQuote,
+    owner: APPROVER, deliveryAddress: WAREHOUSE, freightCharges: 0, notes: "", linkedOrder,
     items: items.length ? items : [newLine()], receipts: [],
-    activities: [{ title: linkedQuote ? `Started from quotation ${linkedQuote}` : "Draft created", meta: stamp(), tone: "system" }],
+    activities: [{ title: linkedOrder ? `Started from order ${linkedOrder}` : "Draft created", meta: stamp(), tone: "system" }],
   };
 }
-export function poFromQuote(quote: Quote, number: string): PurchaseOrder {
-  const items = quote.items.filter((line) => !line.inStock).map((line) => ({ id: `line-${line.id}`, item: line.item, description: line.description, hsn: line.hsn, quantity: line.quantity, rate: Math.round(line.rate * 0.72), gst: line.gst, tracked: true, received: 0, serials: [] }));
-  return blankOrder(number, items, `${quote.number} R${quote.revision}`);
+export function poFromOrder(order: CustomerOrder, number: string): PurchaseOrder {
+  const items = order.items.filter((line) => !line.inStock).map((line) => ({ id: `line-${line.id}`, item: line.item, description: line.description, hsn: line.hsn, quantity: line.quantity, rate: Math.round(line.rate * 0.72), gst: line.gst, tracked: true, received: 0, serials: [] }));
+  return blankOrder(number, items, order.number);
 }
 
-export default function PurchaseOrders() {
-  const { orders, quantities, individuals, quotes } = useErpStore();
+export default function PurchaseOrders({ autoStartLow = false }: { autoStartLow?: boolean } = {}) {
+  const { orders, quantities, individuals, customerOrders, payables, supplierPayments } = useErpStore();
   const setOrders = (change: (all: PurchaseOrder[]) => PurchaseOrder[]) => updateStore((current) => ({ orders: change(current.orders) }));
   const [search, setSearch] = useState(""); const [status, setStatus] = useState("All POs");
-  const [editorId, setEditorId] = useState<string | null>(null); const [choosing, setChoosing] = useState(false); const [toast, setToast] = useState("");
+  const [editorId, setEditorId] = useState<string | null>(null); const [choosing, setChoosing] = useState(autoStartLow); const [toast, setToast] = useState("");
   const flash = (message: string) => { setToast(message); window.setTimeout(() => setToast(""), 4200); };
   const editor = orders.find((order) => order.id === editorId) ?? null;
 
@@ -55,23 +57,23 @@ export default function PurchaseOrders() {
     setOrders((all) => all.some((item) => item.id === order.id) ? all.map((item) => item.id === order.id ? order : item) : [order, ...all]);
     setEditorId(order.id); if (message) flash(message);
   };
-  const create = (items: POLine[], linkedQuote?: string) => {
-    const order = blankOrder(nextNumber(orders), items, linkedQuote);
+  const create = (items: POLine[], linkedOrder?: string) => {
+    const order = blankOrder(nextNumber(orders), items, linkedOrder);
     setOrders((all) => [order, ...all]); setEditorId(order.id); setChoosing(false);
   };
   const duplicate = (order: PurchaseOrder) => {
     const number = nextNumber(orders);
-    const copy: PurchaseOrder = { ...order, id: number, number, status: "Draft", sentAt: undefined, receipts: [], vendorBill: undefined, approvedBy: undefined, orderDate: dateIso(), items: order.items.map((line) => ({ ...line, received: 0, serials: [] })), activities: [{ title: `Copied from ${order.number}`, meta: stamp(), tone: "system" }] };
+    const copy: PurchaseOrder = { ...order, id: number, number, status: "Draft", sentAt: undefined, receipts: [], approvedBy: undefined, orderDate: dateIso(), items: order.items.map((line) => ({ ...line, received: 0, serials: [] })), activities: [{ title: `Copied from ${order.number}`, meta: stamp(), tone: "system" }] };
     setOrders((all) => [copy, ...all]); setEditorId(copy.id); flash("Copy created as a draft");
   };
 
-  const awaiting = orders.filter((order) => order.status === "Awaiting approval");
+  const draft = orders.filter((order) => order.status === "Draft");
   const sent = orders.filter((order) => order.status === "Sent");
   const pending = orders.filter(isOpen);
   const thisMonth = dateIso().slice(0, 7);
   const receivedThisMonth = orders.filter((order) => order.receipts.some((receipt) => receipt.date.startsWith(thisMonth)));
   const cards = [
-    ["Awaiting approval", String(awaiting.length), "Someone must approve", "await", "Awaiting approval"],
+    ["Draft", String(draft.length), "Ready to approve", "await", "Draft"],
     ["Sent to vendor", String(sent.length), "Vendor has the order", "sent", "Sent"],
     ["Pending delivery", String(pending.length), "Still to come", "pending", "Sent"],
     ["Received this month", String(receivedThisMonth.length), "Goods on the shelf", "received", "Received"],
@@ -82,7 +84,7 @@ export default function PurchaseOrders() {
     && (status === "All POs" || statusFor(order) === status)), [orders, search, status]);
 
   if (editor) return <>
-    <POEditor key={editor.id} order={editor} close={() => setEditorId(null)} persist={persist} duplicate={duplicate} flash={flash} quantities={quantities} individuals={individuals} />
+    <POEditor key={editor.id} order={editor} close={() => setEditorId(null)} persist={persist} duplicate={duplicate} flash={flash} quantities={quantities} individuals={individuals} payables={payables} supplierPayments={supplierPayments} />
     {toast && <div className="settings-toast" role="status">✓ {toast}</div>}
   </>;
 
@@ -107,17 +109,17 @@ export default function PurchaseOrders() {
       {!filtered.length && <div className="settings-empty"><b>{orders.length ? "No purchase orders match what you typed" : "No purchase orders yet"}</b><p>{orders.length ? "Clear the search box or pick a different status." : "Start with the items that are running low — we will pre-tick them for you."}</p><button className="erp-action" onClick={() => setChoosing(true)}>+ New PO</button></div>}
     </div>
 
-    {choosing && <StartPO close={() => setChoosing(false)} quantities={quantities} orders={orders} quotes={quotes} create={create} />}
+    {choosing && <StartPO close={() => setChoosing(false)} quantities={quantities} orders={orders} customerOrders={customerOrders} create={create} initialStep={autoStartLow ? "low" : "choose"} />}
     {toast && <div className="settings-toast" role="status">✓ {toast}</div>}
   </section>;
 }
 
-function StartPO({ close, quantities, orders, quotes, create }: { close: () => void; quantities: Quantity[]; orders: PurchaseOrder[]; quotes: Quote[]; create: (items: POLine[], linkedQuote?: string) => void }) {
-  const [step, setStep] = useState<"choose" | "low" | "quote">("choose");
+function StartPO({ close, quantities, orders, customerOrders, create, initialStep = "choose" }: { close: () => void; quantities: Quantity[]; orders: PurchaseOrder[]; customerOrders: CustomerOrder[]; create: (items: POLine[], linkedOrder?: string) => void; initialStep?: "choose" | "low" | "order" }) {
+  const [step, setStep] = useState<"choose" | "low" | "order">(initialStep);
   const low = quantities.filter((item) => totalOf(item) < item.minimum);
   const [ticked, setTicked] = useState<string[]>(low.map((item) => item.id));
   const [amounts, setAmounts] = useState<Record<string, number>>(Object.fromEntries(low.map((item) => [item.id, Math.max(item.minimum * 2 - totalOf(item), item.minimum)])));
-  const accepted = quotes.filter((quote) => quote.status === "Accepted");
+  const needProcurement = customerOrders.filter((order) => order.status === "Open" && order.items.some((line) => !line.inStock));
 
   const fromLow = () => {
     const items = low.filter((item) => ticked.includes(item.id)).map((item) => {
@@ -126,9 +128,9 @@ function StartPO({ close, quantities, orders, quotes, create }: { close: () => v
     });
     create(items);
   };
-  const fromQuote = (quote: Quote) => {
-    const items = quote.items.filter((line) => !line.inStock).map((line) => ({ id: `line-${line.id}`, item: line.item, description: line.description, hsn: line.hsn, quantity: line.quantity, rate: Math.round(line.rate * 0.72), gst: line.gst, tracked: true, received: 0, serials: [] }));
-    create(items.length ? items : [newLine()], `${quote.number} R${quote.revision}`);
+  const fromOrder = (order: CustomerOrder) => {
+    const items = order.items.filter((line) => !line.inStock).map((line) => ({ id: `line-${line.id}`, item: line.item, description: line.description, hsn: line.hsn, quantity: line.quantity, rate: Math.round(line.rate * 0.72), gst: line.gst, tracked: true, received: 0, serials: [] }));
+    create(items.length ? items : [newLine()], order.number);
   };
 
   return <div className="stock-modal-backdrop" onClick={close}><section className="stock-move-modal po-start-modal" role="dialog" aria-modal="true" aria-labelledby="start-po-title" onClick={(event) => event.stopPropagation()}>
@@ -139,7 +141,7 @@ function StartPO({ close, quantities, orders, quotes, create }: { close: () => v
       <p className="po-start-hint">Pick where the items should come from. You can change anything afterwards.</p>
       <div className="po-start-choices">
         <button onClick={() => setStep("low")}><b>Items running low</b><span>{low.length ? `${low.length} item${low.length === 1 ? "" : "s"} below the minimum level — we tick them for you` : "Nothing is below its minimum right now"}</span></button>
-        <button onClick={() => setStep("quote")}><b>Items for an accepted quotation</b><span>Pulls the items you promised a customer but don't have in stock</span></button>
+        <button onClick={() => setStep("order")}><b>Items for a customer order</b><span>Pulls the items an order needs that aren't in stock</span></button>
         <button onClick={() => create([])}><b>Something else</b><span>Start with an empty order and type the items yourself</span></button>
       </div>
     </>}
@@ -158,31 +160,32 @@ function StartPO({ close, quantities, orders, quotes, create }: { close: () => v
       <div className="po-start-footer"><button className="settings-outline" onClick={() => setStep("choose")}>← Back</button><button className="erp-action" disabled={!ticked.length} onClick={fromLow}>Add {ticked.length} item{ticked.length === 1 ? "" : "s"}</button></div>
     </>}
 
-    {step === "quote" && <>
+    {step === "order" && <>
       <p className="po-start-hint">Pick the customer order you are buying for. We take the items you don't have in stock.</p>
-      <div className="invoice-start-list">{accepted.map((quote) => {
-        const needed = quote.items.filter((line) => !line.inStock);
-        return <button key={quote.id} onClick={() => fromQuote(quote)}>
-          <div><b>{quote.customer}</b><span>{quote.subject}</span><small>{quote.number} R{quote.revision} · {needed.length ? `${needed.length} item${needed.length === 1 ? "" : "s"} to buy` : "everything is already in stock"}</small></div>
+      <div className="invoice-start-list">{needProcurement.map((order) => {
+        const needed = order.items.filter((line) => !line.inStock);
+        return <button key={order.id} onClick={() => fromOrder(order)}>
+          <div><b>{order.customer}</b><span>{order.orderType}</span><small>{order.number} · {needed.length} item{needed.length === 1 ? "" : "s"} to buy</small></div>
           <div className="invoice-start-value"><b>{needed.length}</b><em>Use this →</em></div>
-        </button>; })}</div>
+        </button>; })}
+        {!needProcurement.length && <p className="po-empty-note">No open order currently needs anything outside stock.</p>}
+      </div>
       <div className="po-start-footer"><button className="settings-outline" onClick={() => setStep("choose")}>← Back</button></div>
     </>}
   </section></div>;
 }
 
-function POEditor({ order, close, persist, duplicate, flash, quantities, individuals }: { order: PurchaseOrder; close: () => void; persist: (order: PurchaseOrder, message?: string) => void; duplicate: (order: PurchaseOrder) => void; flash: (message: string) => void; quantities: Quantity[]; individuals: Individual[] }) {
+function POEditor({ order, close, persist, duplicate, flash, quantities, individuals, payables, supplierPayments }: { order: PurchaseOrder; close: () => void; persist: (order: PurchaseOrder, message?: string) => void; duplicate: (order: PurchaseOrder) => void; flash: (message: string) => void; quantities: Quantity[]; individuals: Individual[]; payables: Payable[]; supplierPayments: ReturnType<typeof useErpStore>["supplierPayments"] }) {
   const [doc, setDoc] = useState(order);
   const [editVendor, setEditVendor] = useState(false); const [confirming, setConfirming] = useState(false); const [receiving, setReceiving] = useState(false);
   const [overflow, setOverflow] = useState(false); const [preview, setPreview] = useState(false); const [problems, setProblems] = useState<string[]>([]);
-  const [rejecting, setRejecting] = useState(false); const [comment, setComment] = useState("");
+  const [billing, setBilling] = useState(false);
 
   const docStatus = statusFor(doc); const locked = doc.status !== "Draft";
   const localTax = doc.vendorState === COMPANY.state; const totals = poTotals(doc);
-  const needsApproval = totals.grandTotal > APPROVAL_LIMIT;
-  const tdsAmount = Math.round(totals.taxable * doc.tdsRate / 100);
   const stillToCome = doc.items.reduce((total, line) => total + pendingOf(line), 0);
   const collecting = doc.status === "Sent" || doc.status === "Partly received";
+  const payable = payables.find((bill) => bill.poRef === doc.number);
 
   const change = <K extends keyof PurchaseOrder>(key: K, value: PurchaseOrder[K]) => setDoc({ ...doc, [key]: value });
   const chooseVendor = (name: string) => {
@@ -200,22 +203,10 @@ function POEditor({ order, close, persist, duplicate, flash, quantities, individ
   const log = (title: string, tone?: POActivity["tone"]) => [{ title, meta: stamp(), tone }, ...doc.activities];
 
   const saveDraft = () => { const next = { ...doc, activities: log("Draft saved", "system") }; setDoc(next); persist(next, "Draft saved"); };
-  const trySend = () => { const found = blockers(doc); setProblems(found); if (found.length) { setConfirming(false); return; } setConfirming(true); };
-  const send = () => {
-    const next: PurchaseOrder = needsApproval
-      ? { ...doc, status: "Awaiting approval", activities: log(`Sent to ${APPROVER} for approval — above ${money(APPROVAL_LIMIT)}`, "system") }
-      : { ...doc, status: "Sent", sentAt: prettyDate(dateIso()), activities: log(`Sent to ${doc.vendor}`, "sent") };
-    setDoc(next); setConfirming(false);
-    persist(next, needsApproval ? `Sent to ${APPROVER} for approval. They will see it on their dashboard and in Alerts.` : `PO sent to ${doc.vendor}.`);
-  };
+  const tryApprove = () => { const found = blockers(doc); setProblems(found); if (found.length) { setConfirming(false); return; } setConfirming(true); };
   const approve = () => {
-    const next: PurchaseOrder = { ...doc, status: "Sent", approvedBy: APPROVER, approvalComment: comment, sentAt: prettyDate(dateIso()), activities: log(`Approved by ${APPROVER}${comment ? ` — ${comment}` : ""}`, "approved") };
-    setDoc(next); setComment(""); persist(next, `Approved and sent to ${doc.vendor}.`);
-  };
-  const reject = () => {
-    if (!comment.trim()) return;
-    const next: PurchaseOrder = { ...doc, status: "Draft", rejectedBy: APPROVER, activities: log(`Rejected by ${APPROVER} — ${comment}`, "rejected") };
-    setDoc(next); setRejecting(false); setComment(""); persist(next, "Sent back to the buyer as a draft.");
+    const next: PurchaseOrder = { ...doc, status: "Sent", approvedBy: APPROVER, sentAt: prettyDate(dateIso()), activities: log(`Approved and sent to ${doc.vendor}`, "approved") };
+    setDoc(next); setConfirming(false); persist(next, `Approved and sent to ${doc.vendor}.`);
   };
   const cancel = () => { const next: PurchaseOrder = { ...doc, status: "Cancelled", activities: log("PO cancelled", "system") }; setDoc(next); setOverflow(false); persist(next, "PO cancelled"); };
 
@@ -227,6 +218,10 @@ function POEditor({ order, close, persist, duplicate, flash, quantities, individ
     updateStore((current) => applyReceiptToStock(current, doc, receipt));
     persist(next, summary);
   };
+  const createBill = (bill: Payable) => {
+    updateStore((current) => addPayable(current, bill));
+    setBilling(false); flash(`Vendor bill ${bill.number || bill.id} created in Accounts.`);
+  };
 
   return <section className={`quote-editor-page invoice-editor-page${collecting ? " invoice-has-bar" : ""}`}>
     <header className="quote-editor-head"><div>
@@ -235,24 +230,17 @@ function POEditor({ order, close, persist, duplicate, flash, quantities, individ
       <h1>{doc.number}</h1>
       <span className={statusClass(docStatus)}>{docStatus}</span>
       {collecting && stillToCome > 0 && <span className="invoice-due-chip">{stillToCome} still to come</span>}
-      {doc.linkedQuote && <span className="invoice-source-chip">For {doc.linkedQuote}</span>}
+      {doc.linkedOrder && <span className="invoice-source-chip">For {doc.linkedOrder}</span>}
     </div><div className="quote-editor-actions">
       {docStatus === "Draft" && <>
-        <div className="quote-action-anchor"><button className="erp-action" onClick={trySend}>Send to vendor</button>
-          {confirming && <div className="quote-action-popover invoice-confirm"><b>Once sent, this PO can't be edited.{needsApproval ? ` It is above ${money(APPROVAL_LIMIT)}, so ${APPROVER} has to approve it first.` : ""} Send?</b><div><button className="erp-action" onClick={send}>{needsApproval ? "Send for approval" : "Yes, send it"}</button><button className="settings-outline" onClick={() => setConfirming(false)}>Keep editing</button></div></div>}
+        <div className="quote-action-anchor"><button className="erp-action" onClick={tryApprove}>Approve</button>
+          {confirming && <div className="quote-action-popover invoice-confirm"><b>Once approved, this PO is sent to the vendor and can't be edited. Approve and send?</b><div><button className="erp-action" onClick={approve}>Yes, approve</button><button className="settings-outline" onClick={() => setConfirming(false)}>Keep editing</button></div></div>}
         </div>
         <button className="settings-outline" onClick={() => setPreview(true)}>Preview PDF</button>
         <button className="settings-outline" onClick={saveDraft}>Save draft</button>
         <div className="quote-action-anchor"><button className="settings-outline quote-overflow-button" onClick={() => setOverflow(!overflow)} aria-label="More actions">⋯</button>
           {overflow && <div className="quote-overflow-menu"><button className="is-danger" onClick={cancel}>Delete</button></div>}
         </div>
-      </>}
-      {docStatus === "Awaiting approval" && <>
-        <button className="erp-action" onClick={approve}>Approve</button>
-        <div className="quote-action-anchor"><button className="quote-reject" onClick={() => setRejecting(!rejecting)}>Reject</button>
-          {rejecting && <div className="quote-action-popover"><b>Send back to the buyer</b><label><span>Why? <b className="lead-required">Required</b></span><textarea value={comment} onChange={(event) => setComment(event.target.value)} placeholder="Tell them what to change" /></label><button className="erp-action" disabled={!comment.trim()} onClick={reject}>Send it back</button></div>}
-        </div>
-        <button className="settings-outline" onClick={() => setPreview(true)}>Preview</button>
       </>}
       {collecting && <>
         <button className="erp-action" onClick={() => setReceiving(true)}>Receive items</button>
@@ -262,14 +250,12 @@ function POEditor({ order, close, persist, duplicate, flash, quantities, individ
           {overflow && <div className="quote-overflow-menu"><button onClick={() => { setOverflow(false); flash("WhatsApp message ready to share"); }}>Share on WhatsApp</button><button className="is-danger" onClick={cancel}>Cancel</button></div>}
         </div>
       </>}
-      {docStatus === "Received" && <><button className="settings-outline" onClick={() => setPreview(true)}>Preview</button><button className="settings-outline" onClick={() => duplicate(doc)}>Duplicate</button></>}
+      {docStatus === "Received" && <>{!payable && <button className="erp-action" onClick={() => setBilling(true)}>Create vendor bill</button>}<button className="settings-outline" onClick={() => setPreview(true)}>Preview</button><button className="settings-outline" onClick={() => duplicate(doc)}>Duplicate</button></>}
       {docStatus === "Cancelled" && <button className="settings-outline" onClick={() => setPreview(true)}>Preview</button>}
     </div></header>
 
     <main className="invoice-editor-layout">
-      {problems.length > 0 && <div className="invoice-problems" role="alert"><b>Fix this before sending</b><ul>{problems.map((problem) => <li key={problem}>{problem}</li>)}</ul></div>}
-      {doc.status === "Awaiting approval" && <div className="po-approval-banner"><b>Waiting for {APPROVER} to approve</b><span>This order is {money(totals.grandTotal)}, above the {money(APPROVAL_LIMIT)} approval limit set in Settings.</span></div>}
-      {doc.rejectedBy && doc.status === "Draft" && <div className="invoice-problems"><b>{APPROVER} sent this back</b><ul><li>{doc.activities.find((activity) => activity.tone === "rejected")?.title.split(" — ").slice(1).join(" — ") || "See the history below."}</li></ul></div>}
+      {problems.length > 0 && <div className="invoice-problems" role="alert"><b>Fix this before approving</b><ul>{problems.map((problem) => <li key={problem}>{problem}</li>)}</ul></div>}
 
       <section className="quote-document-section invoice-block">
         <div className="quote-section-title"><div><h2>1 · Vendor</h2><span>Everything below fills in from the vendor master.</span></div>{!locked && <button className="invoice-edit-link" onClick={() => setEditVendor(!editVendor)}>{editVendor ? "Done" : "Edit"}</button>}</div>
@@ -329,7 +315,6 @@ function POEditor({ order, close, persist, duplicate, flash, quantities, individ
           <div className="invoice-grand"><span>Grand total</span><b>{money(totals.grandTotal)}</b></div>
         </div>
         <p className="quote-words">{numberWords(totals.grandTotal)}</p>
-        {needsApproval && doc.status === "Draft" && <p className="po-limit-note">Above the {money(APPROVAL_LIMIT)} approval limit — {APPROVER} will have to approve this before it goes out.</p>}
       </section>
 
       <details className="invoice-more">
@@ -339,7 +324,7 @@ function POEditor({ order, close, persist, duplicate, flash, quantities, individ
           <label><span>Deliver to</span><select value={doc.deliveryAddress} disabled={locked} onChange={(event) => change("deliveryAddress", event.target.value)}>{STOCK_LOCATIONS.map((location) => <option key={location}>{location}</option>)}</select></label>
           <label><span>Freight</span><input type="number" min="0" value={doc.freightCharges || ""} disabled={locked} onChange={(event) => change("freightCharges", Number(event.target.value))} placeholder="0" /></label>
           <label><span>Payment terms for this order</span><select value={doc.paymentTerms} disabled={locked} onChange={(event) => change("paymentTerms", event.target.value)}>{TERMS.map((term) => <option key={term}>{term}</option>)}</select></label>
-          <label><span>Linked quotation</span><input value={doc.linkedQuote} disabled={locked} onChange={(event) => change("linkedQuote", event.target.value)} placeholder="e.g. QT-2026-0827 R1" /></label>
+          <label><span>Linked order</span><input value={doc.linkedOrder} disabled={locked} onChange={(event) => change("linkedOrder", event.target.value)} placeholder="e.g. ORD-2026-0500" /></label>
           <label className="quote-grid-wide"><span>Notes to the vendor</span><textarea value={doc.notes} disabled={locked} onChange={(event) => change("notes", event.target.value)} placeholder="Anything the vendor needs to know" /></label>
         </div>
       </details>
@@ -353,13 +338,15 @@ function POEditor({ order, close, persist, duplicate, flash, quantities, individ
       </section>}
 
       {doc.status === "Received" && <section className="quote-document-section invoice-block">
-        <div className="quote-section-title"><div><h2>Vendor payable</h2><span>Sent to Accounts when the goods were received.</span></div></div>
-        <div className="invoice-totals">
-          <div><span>Invoice value</span><b>{money(totals.grandTotal)}</b></div>
-          {doc.tdsRate > 0 && <div><span>Less TDS {doc.tdsRate}% · section {doc.tdsSection}</span><b>−{money(tdsAmount)}</b></div>}
-          <div className="invoice-grand"><span>Pay the vendor</span><b>{money(totals.grandTotal - tdsAmount)}</b></div>
-        </div>
-        <p className="po-bill-line">{doc.vendorBill ? <>Vendor bill <b>{doc.vendorBill}</b> · <button className="invoice-edit-link" onClick={() => flash(`Opening ${doc.vendorBill} in Accounts`)}>Open bill</button></> : "No vendor bill recorded against this order yet."}</p>
+        <div className="quote-section-title"><div><h2>Vendor bill</h2><span>Goes to Accounts as a payable, with TDS where the vendor has it.</span></div></div>
+        {payable ? <>
+          <div className="invoice-totals">
+            <div><span>Bill amount</span><b>{money(payable.amount)}</b></div>
+            {payable.tdsRate ? <div><span>TDS {payable.tdsRate}% · section {payable.tdsSection}</span><b>{money(Math.round(totals.taxable * payable.tdsRate / 100))}</b></div> : null}
+            <div className="invoice-grand"><span>Status</span><b>{payablePaymentStatus(payable, supplierPayments)}</b></div>
+          </div>
+          <p className="po-bill-line">Vendor bill <b>{payable.number || payable.id}</b> is in Accounts → Bills &amp; Expenses.</p>
+        </> : <p className="po-bill-line">No vendor bill recorded against this order yet.</p>}
       </section>}
 
       <section className="quote-document-section invoice-block">
@@ -371,8 +358,32 @@ function POEditor({ order, close, persist, duplicate, flash, quantities, individ
     {collecting && <div className="invoice-mobile-bar po-mobile-bar"><button className="erp-action" onClick={() => setReceiving(true)}>Receive items</button><button className="settings-outline" onClick={() => flash("WhatsApp message ready to share")}>Share on WhatsApp</button></div>}
 
     {receiving && <ReceiveItems order={doc} individuals={individuals} close={() => setReceiving(false)} save={applyReceipt} />}
+    {billing && <VendorBillModal order={doc} totals={totals} close={() => setBilling(false)} save={createBill} />}
     {preview && <POPreview order={doc} totals={totals} localTax={localTax} close={() => setPreview(false)} />}
   </section>;
+}
+
+function VendorBillModal({ order, totals, close, save }: { order: PurchaseOrder; totals: ReturnType<typeof totalsFor>; close: () => void; save: (bill: Payable) => void }) {
+  const [number, setNumber] = useState("");
+  const [billDate, setBillDate] = useState(dateIso());
+  const [dueDate, setDueDate] = useState(addDaysIso(dateIso(), TERM_DAYS[order.paymentTerms] ?? 30));
+  const tdsAmount = Math.round(totals.taxable * (order.tdsRate || 0) / 100);
+
+  const submit = () => save(payableFromPurchaseOrder(order, totals.grandTotal, number.trim() || undefined, billDate, dueDate));
+
+  return <div className="stock-modal-backdrop" onClick={close}><section className="stock-move-modal" role="dialog" aria-modal="true" aria-labelledby="vendor-bill-title" onClick={(event) => event.stopPropagation()}>
+    <button className="stock-modal-close" onClick={close} aria-label="Close">×</button>
+    <p>Purchase Orders</p><h2 id="vendor-bill-title">Create vendor bill</h2>
+    <p className="po-start-hint">{order.vendor} · {order.number}</p>
+    <label className="settings-field"><span>Vendor's bill number <em className="lead-optional">(optional)</em></span><input value={number} onChange={(event) => setNumber(event.target.value)} placeholder="e.g. PSI/INV/2026/551" /></label>
+    <label className="settings-field"><span>Bill date</span><input type="date" value={billDate} onChange={(event) => setBillDate(event.target.value)} /></label>
+    <label className="settings-field"><span>Due date</span><input type="date" value={dueDate} onChange={(event) => setDueDate(event.target.value)} /></label>
+    <div className="invoice-totals">
+      <div><span>Bill amount</span><b>{money(totals.grandTotal)}</b></div>
+      {order.tdsRate > 0 && <div><span>TDS {order.tdsRate}% · section {order.tdsSection}</span><b>{money(tdsAmount)}</b></div>}
+    </div>
+    <div className="stock-move-footer"><button className="settings-outline" onClick={close}>Cancel</button><button className="erp-action" onClick={submit}>Create bill</button></div>
+  </section></div>;
 }
 
 function ReceiveItems({ order, individuals, close, save }: { order: PurchaseOrder; individuals: Individual[]; close: () => void; save: (receipt: Receipt, summary: string) => void }) {

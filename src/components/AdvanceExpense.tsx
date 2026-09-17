@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { dateIso, engineers, money, prettyDate, stamp } from "./erpMasters";
-import { EXPENSE_CATEGORIES, duplicateExpenses, duplicateReference, engineerBalance, balanceStatus, resubmitExpense, reverseExpenseApproval, reversePayment, reviewExpense, submitExpense, updateStore, useErpStore, type Expense, type ExpenseCategory, type ExpensePayment, type ExpenseStatus, type PaymentKind, type SettlementMode } from "./erpStore";
+import { dateIso, ENGINEER, engineers, money, prettyDate, stamp } from "./erpMasters";
+import { EXPENSE_CATEGORIES, duplicateExpenses, duplicateReference, engineerBalance, balanceStatus, reviewExpense, submitExpense, updateStore, useErpStore, type Expense, type ExpenseCategory, type ExpensePayment, type ExpenseStatus, type PaymentKind, type SettlementMode } from "./erpStore";
 import { Overlay, Pagination, useTablePage } from "./ErpUi";
 import "./advanceExpense.css";
 
@@ -11,7 +11,7 @@ const statusClass = (status: string) => status.toLowerCase().replace(/ /g, "-");
 const cls = (label: string) => label.toLowerCase().replace(/[^a-z]+/g, "-").replace(/^-|-$/g, "");
 const PAYMENT_TYPES: PaymentKind[] = ["Advance Paid", "Reimbursement Paid", "Money Returned"];
 const PAYMENT_MODES: SettlementMode[] = ["Cash", "UPI", "Bank Transfer"];
-const STATUSES: ExpenseStatus[] = ["Draft", "Pending Approval", "Changes Requested", "Approved", "Rejected"];
+const STATUSES: ExpenseStatus[] = ["Draft", "Pending Approval", "Approved", "Rejected"];
 const submitLabel = (type: PaymentKind) => type === "Advance Paid" ? "Record Advance" : type === "Reimbursement Paid" ? "Record Reimbursement" : "Record Return";
 
 function balanceLine(balance: number, pendingClaims: number) {
@@ -26,13 +26,14 @@ function billSummary(expense: Pick<Expense, "billFiles" | "billMissingReason">) 
   return "—";
 }
 
-export default function AdvanceExpense({ focusEngineer }: { focusEngineer?: string } = {}) {
+export default function AdvanceExpense({ focusEngineer, isEngineer = false }: { focusEngineer?: string; isEngineer?: boolean } = {}) {
   const store = useErpStore();
   const [tab, setTab] = useState<Tab>("Overview");
   const [toast, setToast] = useState("");
   const flash = (message: string) => { setToast(message); window.setTimeout(() => setToast(""), 4000); };
   const [payFor, setPayFor] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
+  if (isEngineer) return <EngineerExpenseView store={store} />;
   return <section className="leads-page expense-page">
     <div className="leads-heading"><div><p className="erp-secondary-text">People / Advance &amp; Expense</p><h1>Advance &amp; Expense</h1><p className="erp-secondary-text mt-1">Engineer advances, expense claims and settlement payments.</p></div>
       <div className="leads-actions">{tab === "Expenses" && <button className="erp-action" onClick={() => setAdding(true)}>+ Add Expense</button>}<button className="settings-outline" onClick={() => setPayFor("")}>Record Payment</button></div>
@@ -43,6 +44,35 @@ export default function AdvanceExpense({ focusEngineer }: { focusEngineer?: stri
     {tab === "Payments" && <PaymentsView store={store} flash={flash} />}
     {adding && <NewExpenseForm store={store} close={() => setAdding(false)} flash={flash} />}
     {payFor !== null && <RecordPaymentForm store={store} initialEngineer={payFor} close={() => setPayFor(null)} flash={flash} />}
+    {toast && <div className="settings-toast" role="status">✓ {toast}</div>}
+  </section>;
+}
+
+/* ─── Engineer self-service: add an expense, see my advance balance ─── */
+function EngineerExpenseView({ store }: { store: Store }) {
+  const [adding, setAdding] = useState(false);
+  const [toast, setToast] = useState("");
+  const flash = (message: string) => { setToast(message); window.setTimeout(() => setToast(""), 4000); };
+  const stats = engineerBalance(store.expenses, store.advancePayments, ENGINEER);
+  const status = balanceStatus(stats.balance, stats.pendingClaims);
+  const mine = store.expenses.filter((e) => e.engineer === ENGINEER).sort((a, b) => b.expenseDate.localeCompare(a.expenseDate));
+  return <section className="leads-page expense-page">
+    <div className="leads-heading"><div><p className="erp-secondary-text">My Expenses</p><h1>{ENGINEER}</h1><p className="erp-secondary-text mt-1">Add an expense with your bill, and track what SPM owes you.</p></div>
+      <div className="leads-actions"><button className="erp-action" onClick={() => setAdding(true)}>+ Add Expense</button></div>
+    </div>
+    <section className="erp-form-section"><h3>My advance balance</h3><span className={`expense-balance expense-balance--${cls(status)}`}>{balanceLine(stats.balance, stats.pendingClaims)}</span>
+      <dl className="expense-breakdown"><div><dt>Advances paid</dt><dd>{money(stats.advancesPaid)}</dd></div><div><dt>Reimbursements paid</dt><dd>{money(stats.reimbursementsPaid)}</dd></div><div><dt>Approved expenses</dt><dd>−{money(stats.approvedExpenses)}</dd></div>{stats.pendingClaims > 0 && <div><dt>Pending claims</dt><dd>{money(stats.pendingClaims)}</dd></div>}</dl>
+    </section>
+    <section className="erp-form-section"><h3>My expenses</h3>
+      {mine.length ? <div className="erp-table-shell"><table className="erp-data-table expense-table"><thead><tr><th>Expense Date</th><th>Category / Description</th><th className="number">Amount</th><th>Bill</th><th>Status</th></tr></thead><tbody>{mine.map((e) => <tr key={e.id}>
+        <td>{prettyDate(e.expenseDate)}</td>
+        <td><b>{e.category}</b><small>{e.description}</small></td>
+        <td className="number">{money(e.amount)}</td>
+        <td>{billSummary(e)}</td>
+        <td><span className={`job-status job-status--${statusClass(e.status)}`}>{e.status}</span></td>
+      </tr>)}</tbody></table></div> : <p className="erp-muted">No expenses submitted yet.</p>}
+    </section>
+    {adding && <NewExpenseForm store={store} close={() => setAdding(false)} flash={flash} lockEngineer={ENGINEER} />}
     {toast && <div className="settings-toast" role="status">✓ {toast}</div>}
   </section>;
 }
@@ -82,7 +112,7 @@ function EngineerDrawer({ store, engineer, close, openPay }: { store: Store; eng
   const stats = engineerBalance(store.expenses, store.advancePayments, engineer);
   const status = balanceStatus(stats.balance, stats.pendingClaims);
   const mine = store.expenses.filter((e) => e.engineer === engineer).sort((a, b) => b.expenseDate.localeCompare(a.expenseDate));
-  const pending = mine.filter((e) => e.status === "Pending Approval" || e.status === "Changes Requested");
+  const pending = mine.filter((e) => e.status === "Pending Approval");
   const payments = store.advancePayments.filter((p) => p.engineer === engineer).sort((a, b) => b.date.localeCompare(a.date));
   return <Overlay onClose={close} label={`${engineer} advance & expense summary`} className="stock-modal-backdrop expense-overlay"><aside className="settings-drawer expense-drawer">
     <div className="settings-drawer-head"><div><p>Advance &amp; Expense</p><h2>{engineer}</h2></div><button onClick={close} aria-label="Close engineer summary">×</button></div>
@@ -95,7 +125,7 @@ function EngineerDrawer({ store, engineer, close, openPay }: { store: Store; eng
         {pending.length ? <div className="expense-mini-list">{pending.map((e) => <div key={e.id}><b>{prettyDate(e.expenseDate)} · {e.category}</b><span>{money(e.amount)} · {e.status}</span><small>{e.description}</small></div>)}</div> : <p className="erp-muted">Nothing pending.</p>}
       </section>
       <section className="erp-form-section"><h3>Expense history</h3>{mine.length ? <div className="lead-timeline quote-activity">{mine.map((e) => <div key={e.id} className={e.status === "Approved" ? "job-timeline--done" : e.status === "Rejected" ? "lead-timeline--lost" : undefined}><i /><p><b>{prettyDate(e.expenseDate)} · {e.category} · {money(e.amount)}</b><span>{e.status}{e.jobId ? ` · ${e.jobId}` : ""}</span><small>{e.description}</small></p></div>)}</div> : <p className="erp-muted">No expenses recorded.</p>}</section>
-      <section className="erp-form-section"><h3>Payment history</h3>{payments.length ? <div className="lead-timeline quote-activity">{payments.map((p) => <div key={p.id} className={p.status === "Reversed" ? "lead-timeline--lost" : "job-timeline--done"}><i /><p><b>{prettyDate(p.date)} · {p.type} · {money(p.amount)}</b><span>{p.mode}{p.reference ? ` · ${p.reference}` : ""} · {p.status}</span><small>Recorded by {p.recordedBy}{p.status === "Reversed" && p.reversedReason ? ` · Reversed: ${p.reversedReason}` : ""}</small></p></div>)}</div> : <p className="erp-muted">No payments recorded.</p>}</section>
+      <section className="erp-form-section"><h3>Payment history</h3>{payments.length ? <div className="lead-timeline quote-activity">{payments.map((p) => <div key={p.id} className="job-timeline--done"><i /><p><b>{prettyDate(p.date)} · {p.type} · {money(p.amount)}</b><span>{p.mode}{p.reference ? ` · ${p.reference}` : ""}</span><small>Recorded by {p.recordedBy}</small></p></div>)}</div> : <p className="erp-muted">No payments recorded.</p>}</section>
     </div>
   </aside></Overlay>;
 }
@@ -131,8 +161,8 @@ function ExpensesView({ store, flash }: { store: Store; flash: (message: string)
   </>;
 }
 
-function NewExpenseForm({ store, close, flash }: { store: Store; close: () => void; flash: (message: string) => void }) {
-  const [engineer, setEngineer] = useState(engineers[0].name);
+function NewExpenseForm({ store, close, flash, lockEngineer }: { store: Store; close: () => void; flash: (message: string) => void; lockEngineer?: string }) {
+  const [engineer, setEngineer] = useState(lockEngineer ?? engineers[0].name);
   const [expenseDate, setExpenseDate] = useState(dateIso());
   const [category, setCategory] = useState<ExpenseCategory>("Travel");
   const [amount, setAmount] = useState("");
@@ -158,41 +188,39 @@ function NewExpenseForm({ store, close, flash }: { store: Store; close: () => vo
     const problem = validate(asDraft);
     if (problem) { setError(problem); return; }
     const id = `EXP-${Date.now()}`;
-    const expense: Expense = { id, engineer, submittedBy: RECORDER, expenseDate, category, amount: Number(amount) || 0, description: description.trim(), billFiles, billMissingReason: billMissing ? billMissingReason.trim() : undefined, jobId: jobId || undefined, status: asDraft ? "Draft" : "Pending Approval", submittedAt: stamp(), history: [{ action: asDraft ? "Saved as draft" : "Submitted", at: stamp(), by: RECORDER }] };
+    const submittedBy = lockEngineer ?? RECORDER;
+    const expense: Expense = { id, engineer, submittedBy, expenseDate, category, amount: Number(amount) || 0, description: description.trim(), billFiles, billMissingReason: billMissing ? billMissingReason.trim() : undefined, jobId: jobId || undefined, status: asDraft ? "Draft" : "Pending Approval", submittedAt: stamp(), history: [{ action: asDraft ? "Saved as draft" : "Submitted", at: stamp(), by: submittedBy }] };
     updateStore((current) => submitExpense(current, expense));
     close(); flash(asDraft ? `${id} saved as a draft.` : `${id} submitted for approval.`);
   };
-  return <Overlay label="Add Expense" onClose={close}><section className="stock-move-modal expense-form-modal"><header className="jobs-form-header"><div><h2>Add Expense</h2><p>On behalf of an engineer</p></div><button className="settings-outline" aria-label="Close" onClick={close}>×</button></header><div className="jobs-form-body">
+  return <Overlay label="Add Expense" onClose={close}><section className="stock-move-modal expense-form-modal"><header className="jobs-form-header"><div><h2>Add Expense</h2><p>{lockEngineer ? "Add your bill and submit for approval" : "On behalf of an engineer"}</p></div><button className="settings-outline" aria-label="Close" onClick={close}>×</button></header><div className="jobs-form-body">
     <div className="quote-header-grid ci-form-grid">
-      <label><span>Engineer <b className="lead-required">Required</b></span><select value={engineer} onChange={(event) => { setEngineer(event.target.value); setJobId(""); }}>{engineers.map((entry) => <option key={entry.name}>{entry.name}</option>)}</select></label>
+      {lockEngineer ? <label><span>Engineer</span><input value={engineer} disabled /></label> : <label><span>Engineer <b className="lead-required">Required</b></span><select value={engineer} onChange={(event) => { setEngineer(event.target.value); setJobId(""); }}>{engineers.map((entry) => <option key={entry.name}>{entry.name}</option>)}</select></label>}
       <label><span>Expense date <b className="lead-required">Required</b></span><input type="date" value={expenseDate} onChange={(event) => setExpenseDate(event.target.value)} /></label>
       <label><span>Category</span><select value={category} onChange={(event) => setCategory(event.target.value as ExpenseCategory)}>{EXPENSE_CATEGORIES.map((entry) => <option key={entry}>{entry}</option>)}</select></label>
       <label><span>Amount (₹)</span><input type="number" min="0" step="0.01" value={amount} onChange={(event) => setAmount(event.target.value)} /></label>
       <label><span>Job / customer (optional)</span><select value={jobId} onChange={(event) => setJobId(event.target.value)}><option value="">Not linked</option>{jobOptions.map((job) => <option key={job.id} value={job.id}>{job.number} · {job.customer}</option>)}</select></label>
       <label className="quote-grid-wide"><span>Short description</span><input value={description} onChange={(event) => setDescription(event.target.value)} placeholder="What was this for?" /></label>
     </div>
-    <label className="expense-file-field"><span>Bill attachment(s)</span><input type="file" accept="image/*,application/pdf" multiple onChange={chooseFiles} />{billFiles.length > 0 && <small>{billFiles.join(", ")}</small>}</label>
+    <label className="expense-file-field"><span>Bill photo</span><input type="file" accept="image/*,application/pdf" multiple onChange={chooseFiles} />{billFiles.length > 0 && <small>{billFiles.join(", ")}</small>}</label>
     <label className="settings-check"><input type="checkbox" checked={billMissing} onChange={(event) => setBillMissing(event.target.checked)} /><span>Bill unavailable</span></label>
     {billMissing && <label className="due-notes"><span>Reason <b className="lead-required">Required</b></span><textarea value={billMissingReason} onChange={(event) => setBillMissingReason(event.target.value)} placeholder="Why there is no bill for this expense" /></label>}
     {error && <p className="jobs-form-error" role="alert">{error}</p>}
-  </div><footer className="jobs-form-footer"><button className="settings-outline" onClick={close}>Cancel</button><div className="expense-inline-actions"><button className="settings-outline" onClick={() => submit(true)}>Save as Draft</button><button className="erp-action" onClick={() => submit(false)}>Submit for Approval</button></div></footer></section></Overlay>;
+  </div><footer className="jobs-form-footer"><button className="settings-outline" onClick={close}>Cancel</button><div className="expense-inline-actions">{!lockEngineer && <button className="settings-outline" onClick={() => submit(true)}>Save as Draft</button>}<button className="erp-action" onClick={() => submit(false)}>Submit for Approval</button></div></footer></section></Overlay>;
 }
 
 function ExpenseDrawer({ store, expense, close, flash }: { store: Store; expense: Expense; close: () => void; flash: (message: string) => void }) {
-  const [decision, setDecision] = useState<"Send Back" | "Reject" | "Reverse" | null>(null);
+  const [rejecting, setRejecting] = useState(false);
   const [reason, setReason] = useState("");
   const [error, setError] = useState("");
-  const [editing, setEditing] = useState(false);
   const dupes = duplicateExpenses(store.expenses, expense);
   const job = expense.jobId ? store.jobs.find((entry) => entry.id === expense.jobId) : undefined;
   const approve = () => { updateStore((current) => reviewExpense(current, expense.id, "Approved", RECORDER)); flash(`${expense.id} approved. Balance updated.`); };
-  const confirmDecision = () => {
+  const confirmReject = () => {
     if (!reason.trim()) { setError("Enter a reason."); return; }
-    if (decision === "Send Back") updateStore((current) => reviewExpense(current, expense.id, "Changes Requested", RECORDER, reason.trim()));
-    else if (decision === "Reject") updateStore((current) => reviewExpense(current, expense.id, "Rejected", RECORDER, reason.trim()));
-    else if (decision === "Reverse") updateStore((current) => reverseExpenseApproval(current, expense.id, RECORDER, reason.trim()));
-    flash(decision === "Reverse" ? `${expense.id} approval reversed — back in Changes Requested.` : `${expense.id} ${decision === "Send Back" ? "sent back" : "rejected"}.`);
-    setDecision(null); setReason(""); setError("");
+    updateStore((current) => reviewExpense(current, expense.id, "Rejected", RECORDER, reason.trim()));
+    flash(`${expense.id} rejected.`);
+    setRejecting(false); setReason(""); setError("");
   };
   return <Overlay onClose={close} label={`Review ${expense.id}`} className="stock-modal-backdrop expense-overlay"><aside className="settings-drawer expense-drawer expense-review-drawer">
     <div className="settings-drawer-head"><div><p>{expense.id} · {expense.status}</p><h2>{expense.engineer}</h2></div><button onClick={close} aria-label="Close expense review">×</button></div>
@@ -210,42 +238,14 @@ function ExpenseDrawer({ store, expense, close, flash }: { store: Store; expense
         </dl></section>
         {dupes.length > 0 && <section className="erp-form-section"><p className="expense-warning">Possible duplicate: {expense.engineer} already has {dupes.length} other expense{dupes.length === 1 ? "" : "s"} for {money(expense.amount)} on {prettyDate(expense.expenseDate)}. Review before approving.</p></section>}
         <section className="erp-form-section"><h3>Review history</h3><div className="lead-timeline quote-activity">{expense.history.map((entry, index) => <div key={index}><i /><p><b>{entry.action}</b><span>{entry.at} · {entry.by}</span>{entry.reason && <small>{entry.reason}</small>}</p></div>)}</div></section>
-        {editing && <ResubmitFields store={store} expense={expense} close={() => setEditing(false)} flash={flash} closeDrawer={close} />}
-        {decision && <section className="erp-form-section"><label className="due-notes"><span>Reason <b className="lead-required">Required</b></span><textarea value={reason} onChange={(event) => setReason(event.target.value)} autoFocus /></label>{error && <p className="jobs-form-error" role="alert">{error}</p>}<div className="expense-inline-actions"><button className="settings-outline" onClick={() => { setDecision(null); setReason(""); setError(""); }}>Cancel</button><button className="erp-action" onClick={confirmDecision}>Confirm {decision}</button></div></section>}
+        {rejecting && <section className="erp-form-section"><label className="due-notes"><span>Reason <b className="lead-required">Required</b></span><textarea value={reason} onChange={(event) => setReason(event.target.value)} autoFocus /></label>{error && <p className="jobs-form-error" role="alert">{error}</p>}<div className="expense-inline-actions"><button className="settings-outline" onClick={() => { setRejecting(false); setReason(""); setError(""); }}>Cancel</button><button className="erp-action" onClick={confirmReject}>Confirm Reject</button></div></section>}
       </section>
     </div>
-    {!decision && !editing && <footer className="attendance-drawer-footer">
-      {expense.status === "Pending Approval" && <><button className="settings-outline" onClick={() => setDecision("Send Back")}>Send Back</button><button className="settings-outline" onClick={() => setDecision("Reject")}>Reject</button><button className="erp-action" onClick={approve}>Approve</button></>}
-      {expense.status === "Changes Requested" && <button className="erp-action" onClick={() => setEditing(true)}>Edit &amp; Resubmit</button>}
-      {expense.status === "Approved" && <button className="settings-outline" onClick={() => setDecision("Reverse")}>Reverse Approval</button>}
-      {(expense.status === "Rejected" || expense.status === "Draft") && <button className="settings-outline" onClick={close}>Close</button>}
+    {!rejecting && <footer className="attendance-drawer-footer">
+      {expense.status === "Pending Approval" && <><button className="settings-outline" onClick={() => setRejecting(true)}>Reject</button><button className="erp-action" onClick={approve}>Approve</button></>}
+      {expense.status !== "Pending Approval" && <button className="settings-outline" onClick={close}>Close</button>}
     </footer>}
   </aside></Overlay>;
-}
-
-function ResubmitFields({ store, expense, close, flash, closeDrawer }: { store: Store; expense: Expense; close: () => void; flash: (message: string) => void; closeDrawer: () => void }) {
-  const [category, setCategory] = useState(expense.category);
-  const [amount, setAmount] = useState(String(expense.amount));
-  const [description, setDescription] = useState(expense.description);
-  const [billFiles, setBillFiles] = useState(expense.billFiles);
-  const [jobId, setJobId] = useState(expense.jobId ?? "");
-  const [error, setError] = useState("");
-  const jobOptions = store.jobs.filter((job) => job.engineer === expense.engineer);
-  const submit = () => {
-    const value = Number(amount);
-    if (!Number.isFinite(value) || value <= 0) { setError("Enter an amount greater than zero."); return; }
-    if (!description.trim()) { setError("Enter a short description."); return; }
-    if (!billFiles.length && !expense.billMissingReason) { setError("Attach a bill, or note why it is unavailable."); return; }
-    updateStore((current) => resubmitExpense(current, expense.id, { category, amount: value, description: description.trim(), billFiles, billMissingReason: expense.billMissingReason, jobId: jobId || undefined }));
-    close(); closeDrawer(); flash(`${expense.id} corrected and resubmitted for approval.`);
-  };
-  return <section className="erp-form-section expense-resubmit"><h3>Correct and resubmit</h3><div className="quote-header-grid ci-form-grid">
-    <label><span>Category</span><select value={category} onChange={(event) => setCategory(event.target.value as ExpenseCategory)}>{EXPENSE_CATEGORIES.map((entry) => <option key={entry}>{entry}</option>)}</select></label>
-    <label><span>Amount (₹)</span><input type="number" min="0" step="0.01" value={amount} onChange={(event) => setAmount(event.target.value)} /></label>
-    <label><span>Job / customer</span><select value={jobId} onChange={(event) => setJobId(event.target.value)}><option value="">Not linked</option>{jobOptions.map((job) => <option key={job.id} value={job.id}>{job.number} · {job.customer}</option>)}</select></label>
-    <label className="quote-grid-wide"><span>Description</span><input value={description} onChange={(event) => setDescription(event.target.value)} /></label>
-    <label className="expense-file-field quote-grid-wide"><span>Replace bill attachment(s)</span><input type="file" accept="image/*,application/pdf" multiple onChange={(event) => setBillFiles(Array.from(event.target.files ?? []).map((file) => file.name))} />{billFiles.length > 0 && <small>{billFiles.join(", ")}</small>}</label>
-  </div>{error && <p className="jobs-form-error" role="alert">{error}</p>}<div className="expense-inline-actions"><button className="settings-outline" onClick={close}>Cancel</button><button className="erp-action" onClick={submit}>Resubmit</button></div></section>;
 }
 
 /* ─── Payments ────────────────────────────────────────────────────── */
@@ -264,28 +264,20 @@ function PaymentsView({ store, flash }: { store: Store; flash: (message: string)
   return <>
     <div className="erp-filters expense-filters"><label className="expense-search"><span>Search payments</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Engineer or reference" /></label><label><span>Payment type</span><select value={type} onChange={(event) => setType(event.target.value as typeof type)}><option value="All">All types</option>{PAYMENT_TYPES.map((entry) => <option key={entry}>{entry}</option>)}</select></label><label><span>Engineer</span><select value={engineerFilter} onChange={(event) => setEngineerFilter(event.target.value)}><option>All engineers</option>{engineers.map((entry) => <option key={entry.name}>{entry.name}</option>)}</select></label></div>
     <div className="erp-filter-summary"><span>{rows.length} of {store.advancePayments.length} payments{active && ` · ${[query && `Search: ${query}`, type !== "All" && type, engineerFilter !== "All engineers" && engineerFilter].filter(Boolean).join(" · ")}`}</span><div className="expense-inline-actions">{active && <button className="settings-link" onClick={clear}>Clear all</button>}<label>Sort by <select value={sort} onChange={(event) => setSort(event.target.value)}><option value="date">Latest first</option><option value="amount">Amount, highest first</option><option value="engineer">Engineer A–Z</option></select></label></div></div>
-    <div className="erp-table-shell"><table className="erp-data-table expense-payments-table"><colgroup><col style={{ width: "11%" }} /><col style={{ width: "14%" }} /><col style={{ width: "15%" }} /><col style={{ width: "11%" }} /><col style={{ width: "10%" }} /><col style={{ width: "14%" }} /><col style={{ width: "13%" }} /><col style={{ width: "12%" }} /></colgroup><thead><tr><th>Date</th><th>Engineer</th><th>Payment Type</th><th className="number">Amount</th><th>Mode</th><th>Reference</th><th>Recorded By</th><th>Status</th></tr></thead><tbody>{pageRows.map((p) => { const dupeRef = duplicateReference(store.advancePayments, p.reference ?? "", p.id); return <tr key={p.id} className="erp-row-clickable" onClick={() => setOpenId(p.id)}>
+    <div className="erp-table-shell"><table className="erp-data-table expense-payments-table"><colgroup><col style={{ width: "12%" }} /><col style={{ width: "16%" }} /><col style={{ width: "17%" }} /><col style={{ width: "12%" }} /><col style={{ width: "11%" }} /><col style={{ width: "17%" }} /><col style={{ width: "15%" }} /></colgroup><thead><tr><th>Date</th><th>Engineer</th><th>Payment Type</th><th className="number">Amount</th><th>Mode</th><th>Reference</th><th>Recorded By</th></tr></thead><tbody>{pageRows.map((p) => { const dupeRef = duplicateReference(store.advancePayments, p.reference ?? "", p.id); return <tr key={p.id} className="erp-row-clickable" onClick={() => setOpenId(p.id)}>
       <td>{prettyDate(p.date)}</td><td><b>{p.engineer}</b></td><td>{p.type}</td><td className="number">{money(p.amount)}</td><td>{p.mode}</td>
-      <td>{p.reference || <span className="erp-muted">—</span>}{dupeRef.length > 0 && p.status !== "Reversed" && <small className="job-late">Repeated reference</small>}</td>
-      <td>{p.recordedBy}</td><td><span className={`job-status job-status--${p.status === "Reversed" ? "cancelled" : "completed"}`}>{p.status}</span></td>
+      <td>{p.reference || <span className="erp-muted">—</span>}{dupeRef.length > 0 && <small className="job-late">Repeated reference</small>}</td>
+      <td>{p.recordedBy}</td>
     </tr>; })}</tbody></table>{!rows.length && <div className="settings-empty"><b>No payments match these filters</b><p>Try another type, engineer or search.</p><button className="settings-outline" onClick={clear}>Clear filters</button></div>}</div>
     <Pagination total={rows.length} page={page} onPage={setPage} />
-    {selected && <PaymentDrawer store={store} payment={selected} close={() => setOpenId(null)} flash={flash} />}
+    {selected && <PaymentDrawer store={store} payment={selected} close={() => setOpenId(null)} />}
   </>;
 }
 
-function PaymentDrawer({ store, payment, close, flash }: { store: Store; payment: ExpensePayment; close: () => void; flash: (message: string) => void }) {
-  const [reversing, setReversing] = useState(false);
-  const [reason, setReason] = useState("");
-  const [error, setError] = useState("");
+function PaymentDrawer({ store, payment, close }: { store: Store; payment: ExpensePayment; close: () => void }) {
   const job = payment.jobId ? store.jobs.find((entry) => entry.id === payment.jobId) : undefined;
-  const confirmReverse = () => {
-    if (!reason.trim()) { setError("Enter a reason for the reversal."); return; }
-    updateStore((current) => reversePayment(current, payment.id, RECORDER, reason.trim()));
-    flash(`${payment.id} marked as reversed. This does not reverse an actual bank/UPI transfer.`); close();
-  };
   return <Overlay onClose={close} label={`Payment ${payment.id}`} className="stock-modal-backdrop expense-overlay"><aside className="settings-drawer expense-drawer">
-    <div className="settings-drawer-head"><div><p>{payment.id} · {payment.status}</p><h2>{payment.type} · {payment.engineer}</h2></div><button onClick={close} aria-label="Close payment details">×</button></div>
+    <div className="settings-drawer-head"><div><p>{payment.id}</p><h2>{payment.type} · {payment.engineer}</h2></div><button onClick={close} aria-label="Close payment details">×</button></div>
     <div className="expense-drawer-body">
       <section className="erp-form-section"><h3>Payment details</h3><dl className="invoice-facts due-facts">
         <div><dt>Amount</dt><dd>{money(payment.amount)}</dd></div><div><dt>Date</dt><dd>{prettyDate(payment.date)}</dd></div>
@@ -294,10 +286,7 @@ function PaymentDrawer({ store, payment, close, flash }: { store: Store; payment
         {payment.notes && <div className="invoice-fact-wide"><dt>Notes</dt><dd>{payment.notes}</dd></div>}
         {payment.overrideReason && <div className="invoice-fact-wide"><dt>Override reason</dt><dd>{payment.overrideReason}</dd></div>}
       </dl></section>
-      {payment.status === "Reversed" && <section className="erp-form-section"><p className="expense-warning">Reversed by {payment.reversedBy} · {payment.reversedAt}<br />{payment.reversedReason}</p><p className="erp-muted">This marks the record as reversed for balance purposes only — it does not undo an actual bank or UPI transfer.</p></section>}
-      {reversing && <section className="erp-form-section"><label className="due-notes"><span>Reason <b className="lead-required">Required</b></span><textarea value={reason} onChange={(event) => setReason(event.target.value)} autoFocus /></label>{error && <p className="jobs-form-error" role="alert">{error}</p>}<div className="expense-inline-actions"><button className="settings-outline" onClick={() => { setReversing(false); setReason(""); setError(""); }}>Cancel</button><button className="erp-action" onClick={confirmReverse}>Confirm reversal</button></div></section>}
     </div>
-    {!reversing && payment.status === "Posted" && <footer className="attendance-drawer-footer"><button className="settings-outline" onClick={() => setReversing(true)}>Reverse Payment</button></footer>}
   </aside></Overlay>;
 }
 
@@ -330,7 +319,7 @@ function RecordPaymentForm({ store, initialEngineer, close, flash }: { store: St
     if (exceeds && !overrideReason.trim()) { setError(`This exceeds the ${type === "Money Returned" ? "amount currently with the engineer" : "outstanding reimbursement"} (${money(outstanding ?? 0)}). Enter a reason to record it anyway, or record the extra separately as a new Advance Paid.`); return; }
     setSubmitting(true);
     const id = `PAY-${Date.now()}`;
-    const payment: ExpensePayment = { id, engineer, type, amount: value, date, mode, reference: reference.trim() || undefined, jobId: jobId || undefined, notes: notes.trim() || undefined, overrideReason: exceeds ? overrideReason.trim() : undefined, recordedBy: RECORDER, recordedAt: stamp(), status: "Posted" };
+    const payment: ExpensePayment = { id, engineer, type, amount: value, date, mode, reference: reference.trim() || undefined, jobId: jobId || undefined, notes: notes.trim() || undefined, overrideReason: exceeds ? overrideReason.trim() : undefined, recordedBy: RECORDER, recordedAt: stamp() };
     updateStore((current) => ({ advancePayments: [payment, ...current.advancePayments] }));
     close(); flash(`${id} recorded — ${type} of ${money(value)} for ${engineer}.`);
   };

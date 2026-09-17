@@ -13,7 +13,6 @@ export type Quote = {
   contact: string;
   customerGstin: string;
   customerState: string;
-  customerStateOverridden?: boolean;
   billingAddress: string;
   shippingAddress: string;
   paymentTerms: string;
@@ -26,6 +25,7 @@ export type Quote = {
   sentAt?: string;
   acceptedPo?: string;
   acceptedDate?: string;
+  orderRef?: string;
   rejectionReason?: string;
   items: QuoteLine[];
   terms: string;
@@ -35,7 +35,7 @@ export type Quote = {
   freightCharges?: number;
   activities?: QuoteActivity[];
 };
-export type Customer = { name: string; contact: string; gstin: string; state: string; billing: string; shipping: string; paymentTerms: string };
+export type Customer = { id: string; name: string; contact: string; gstin: string; state: string; city: string; billing: string; shipping: string; paymentTerms: string };
 export type StockOption = { name: string; description: string; hsn: string; unit: string; rate: number; gst: number; inStock: boolean; code?: string };
 
 export const COMPANY = { name: "SPM Lab Solutions Pvt. Ltd.", gstin: "29AAJCS2441N1ZK", state: "Karnataka", address: "Indiranagar, Bengaluru, Karnataka 560038", bank: "HDFC Bank · 50200012345678 · HDFC0000123" };
@@ -43,14 +43,14 @@ export const DEFAULT_TERMS = "Payment due within the agreed credit period. Price
 export const INDIAN_STATES = ["Andaman & Nicobar Islands", "Andhra Pradesh", "Arunachal Pradesh", "Assam", "Bihar", "Chandigarh", "Chhattisgarh", "Dadra & Nagar Haveli and Daman & Diu", "Delhi", "Goa", "Gujarat", "Haryana", "Himachal Pradesh", "Jammu & Kashmir", "Jharkhand", "Karnataka", "Kerala", "Ladakh", "Lakshadweep", "Madhya Pradesh", "Maharashtra", "Manipur", "Meghalaya", "Mizoram", "Nagaland", "Odisha", "Puducherry", "Punjab", "Rajasthan", "Sikkim", "Tamil Nadu", "Telangana", "Tripura", "Uttar Pradesh", "Uttarakhand", "West Bengal"];
 
 export const customerMaster: Customer[] = [
-  { name: "Aster Pharma", contact: "Divya Menon", gstin: "29AAMCA4820G1ZJ", state: "Karnataka", billing: "Whitefield Industrial Area, Bengaluru, Karnataka 560066", shipping: "Sterile Manufacturing Block, Aster Pharma, Bengaluru, Karnataka 560066", paymentTerms: "Net 30" },
-  { name: "Biocon Biologics", contact: "Vivek Iyer", gstin: "29AACCB1456R1ZL", state: "Karnataka", billing: "Electronic City Phase II, Bengaluru, Karnataka 560100", shipping: "QC Microbiology Lab, Biocon Biologics, Bengaluru, Karnataka 560100", paymentTerms: "Net 30" },
-  { name: "Cloudnine Hospitals", contact: "Dr. Nisha Rao", gstin: "29AAECC7731K1ZU", state: "Karnataka", billing: "Old Airport Road, Bengaluru, Karnataka 560017", shipping: "OT & Infection Control, Cloudnine Hospitals, Bengaluru, Karnataka 560017", paymentTerms: "Net 15" },
-  { name: "Nova Instruments", contact: "Rhea Mehta", gstin: "29AABCN4106D1Z7", state: "Karnataka", billing: "12, HAL 2nd Stage, Indiranagar, Bengaluru, Karnataka 560038", shipping: "Materials Lab, Nova Instruments, Bengaluru, Karnataka 560038", paymentTerms: "Net 30" },
-  { name: "Helix Labs", contact: "Kiran Rao", gstin: "36AABCH2119P1Z5", state: "Telangana", billing: "Plot 7, Genome Valley, Hyderabad, Telangana 500078", shipping: "Plot 7, Genome Valley, Hyderabad, Telangana 500078", paymentTerms: "Net 15" },
-  { name: "Tera Research", contact: "Sana Iyer", gstin: "33AABCT6281H1ZA", state: "Tamil Nadu", billing: "21, OMR Road, Thoraipakkam, Chennai, Tamil Nadu 600097", shipping: "Surface Science Lab, OMR Road, Chennai, Tamil Nadu 600097", paymentTerms: "Net 30" },
-  { name: "Vector Bio Labs", contact: "Nikhil Arora", gstin: "27AABCV8041G1ZQ", state: "Maharashtra", billing: "88, MIDC Andheri East, Mumbai, Maharashtra 400093", shipping: "88, MIDC Andheri East, Mumbai, Maharashtra 400093", paymentTerms: "Net 45" },
-  { name: "Arka Diagnostics", contact: "Meera Nair", gstin: "29AAECA5512M1Z3", state: "Karnataka", billing: "44, Peenya Industrial Area, Bengaluru, Karnataka 560058", shipping: "44, Peenya Industrial Area, Bengaluru, Karnataka 560058", paymentTerms: "Net 30" },
+  { id: "CUS-0001", name: "Aster Pharma", contact: "Divya Menon", gstin: "29AAMCA4820G1ZJ", state: "Karnataka", city: "Bengaluru", billing: "Whitefield Industrial Area, Bengaluru, Karnataka 560066", shipping: "Sterile Manufacturing Block, Aster Pharma, Bengaluru, Karnataka 560066", paymentTerms: "Net 30" },
+  { id: "CUS-0002", name: "Biocon Biologics", contact: "Vivek Iyer", gstin: "29AACCB1456R1ZL", state: "Karnataka", city: "Bengaluru", billing: "Electronic City Phase II, Bengaluru, Karnataka 560100", shipping: "QC Microbiology Lab, Biocon Biologics, Bengaluru, Karnataka 560100", paymentTerms: "Net 30" },
+  { id: "CUS-0003", name: "Cloudnine Hospitals", contact: "Dr. Nisha Rao", gstin: "29AAECC7731K1ZU", state: "Karnataka", city: "Bengaluru", billing: "Old Airport Road, Bengaluru, Karnataka 560017", shipping: "OT & Infection Control, Cloudnine Hospitals, Bengaluru, Karnataka 560017", paymentTerms: "Net 15" },
+  { id: "CUS-0004", name: "Nova Instruments", contact: "Rhea Mehta", gstin: "29AABCN4106D1Z7", state: "Karnataka", city: "Bengaluru", billing: "12, HAL 2nd Stage, Indiranagar, Bengaluru, Karnataka 560038", shipping: "Materials Lab, Nova Instruments, Bengaluru, Karnataka 560038", paymentTerms: "Net 30" },
+  { id: "CUS-0005", name: "Helix Labs", contact: "Kiran Rao", gstin: "36AABCH2119P1Z5", state: "Telangana", city: "Hyderabad", billing: "Plot 7, Genome Valley, Hyderabad, Telangana 500078", shipping: "Plot 7, Genome Valley, Hyderabad, Telangana 500078", paymentTerms: "Net 15" },
+  { id: "CUS-0006", name: "Tera Research", contact: "Sana Iyer", gstin: "33AABCT6281H1ZA", state: "Tamil Nadu", city: "Chennai", billing: "21, OMR Road, Thoraipakkam, Chennai, Tamil Nadu 600097", shipping: "Surface Science Lab, OMR Road, Chennai, Tamil Nadu 600097", paymentTerms: "Net 30" },
+  { id: "CUS-0007", name: "Vector Bio Labs", contact: "Nikhil Arora", gstin: "27AABCV8041G1ZQ", state: "Maharashtra", city: "Mumbai", billing: "88, MIDC Andheri East, Mumbai, Maharashtra 400093", shipping: "88, MIDC Andheri East, Mumbai, Maharashtra 400093", paymentTerms: "Net 45" },
+  { id: "CUS-0008", name: "Arka Diagnostics", contact: "Meera Nair", gstin: "29AAECA5512M1Z3", state: "Karnataka", city: "Bengaluru", billing: "44, Peenya Industrial Area, Bengaluru, Karnataka 560058", shipping: "44, Peenya Industrial Area, Bengaluru, Karnataka 560058", paymentTerms: "Net 30" },
 ];
 
 export const stockCatalog: StockOption[] = [
@@ -86,12 +86,7 @@ export function istStamp(iso: string) { return `${istDate(iso)} · ${istTime(iso
 export function isoDateInIst(iso: string) { return new Intl.DateTimeFormat("en-CA", { year: "numeric", month: "2-digit", day: "2-digit", timeZone: "Asia/Kolkata" }).format(new Date(iso)); }
 export const stamp = () => `${istStamp(nowIso())} · Arun Kumar`;
 
-// Slot → clock-time mapping and 24h/12h helpers, used for schedule capacity and visit windows.
-export const SLOT_TIMES: Record<"Morning" | "Afternoon" | "Full day", { start: string; end: string }> = {
-  Morning: { start: "09:30", end: "13:00" },
-  Afternoon: { start: "14:00", end: "18:00" },
-  "Full day": { start: "09:30", end: "18:00" },
-};
+// 24h/12h time helpers, used for visit windows and attendance.
 export const timeToMinutes = (time: string) => { const [h, m] = time.split(":").map(Number); return h * 60 + m; };
 export const minutesToTime = (mins: number) => `${String(Math.floor(mins / 60)).padStart(2, "0")}:${String(mins % 60).padStart(2, "0")}`;
 export function label12h(time: string) { const [h, m] = time.split(":").map(Number); const period = h >= 12 ? "PM" : "AM"; const hour12 = h % 12 === 0 ? 12 : h % 12; return `${String(hour12).padStart(2, "0")}:${String(m).padStart(2, "0")} ${period}`; }
@@ -145,7 +140,6 @@ export type Vendor = { name: string; contact: string; gstin: string; state: stri
 
 export const WAREHOUSE = "Central Warehouse";
 export const STOCK_LOCATIONS = [WAREHOUSE, "Warehouse 2 · Peenya"];
-export const APPROVAL_LIMIT = 200_000;
 export const APPROVER = "Arun Kumar";
 export const STOCK_UNITS = ["Nos", "Set", "Pack", "Box", "Metre", "Litre"];
 // SPM has not confirmed whether calibration is done in-house, outsourced, or both — keep this
@@ -162,7 +156,7 @@ export const vendorMaster: Vendor[] = [
 
 // Settings → Alerts. Due Dates reads these; it never offers its own copy of them.
 export const ALERT_SETTINGS = {
-  leadDays: { Calibration: 21, Rental: 7, AMC: 14, Renewal: 60, Payment: 7, Bill: 7, VendorBill: 15, Master: 90, Statutory: 20 } as Record<string, number>,
+  leadDays: { Calibration: 21, Rental: 7, AMC: 14, Renewal: 60, Payment: 7, Bill: 7, Master: 90, Statutory: 20 } as Record<string, number>,
   channel: { Calibration: "Email", Rental: "WhatsApp", AMC: "Email", Payment: "Email + WhatsApp", Bill: "Email" } as Record<string, string>,
   template: { Calibration: "Calibration reminder", Rental: "Rental return reminder", AMC: "Service visit reminder", Payment: "Payment reminder", Bill: "—" } as Record<string, string>,
   repeatOverdueDaily: true,
@@ -170,11 +164,7 @@ export const ALERT_SETTINGS = {
 export const ENGINEER = "Nikhil Rao";
 export const CAL_LAB = "CalLab Services";
 
-// Skill tags are a light, demonstration mapping from job type to the capability it needs.
-// Not every engineer has every skill — where a job's type has no mapped skill, or an engineer's
-// skill list is empty, the assignment panel says "Needs review" rather than inventing a fit.
 export type EngineerSkill = "Calibration" | "Preventive service" | "Repair" | "Installation" | "Logistics";
-export const JOB_TYPE_SKILL: Partial<Record<string, EngineerSkill>> = { Calibration: "Calibration", Service: "Preventive service", Repair: "Repair", Installation: "Installation", "Rental delivery": "Logistics", "Rental pickup": "Logistics" };
 
 // Field team and the sites we visit. Cities drive trip clustering, so they matter.
 export type Engineer = { name: string; base: string; phone: string; initials: string; skills: EngineerSkill[] };
@@ -209,13 +199,10 @@ export const siteById = (id: string) => customerSites.find((site) => site.id ===
 
 // Settings → Operations. The scheduling screens read these; they never offer their own copy.
 export const JOB_SETTINGS = {
-  engineerDailyLimit: 3,
   defaultCalibrationMonths: 12,
-  defaultSlot: "Morning" as "Morning" | "Afternoon" | "Full day",
   unassignedAlertTo: ["Arun Kumar", "Priya Shah"],
 };
-export const JOB_TYPES = ["Calibration", "Service", "Repair", "Installation", "Rental delivery", "Rental pickup"] as const;
-export const JOB_SLOTS = ["Morning", "Afternoon", "Full day"] as const;
+export const JOB_TYPES = ["Calibration", "Repair", "Validation/Testing", "Install"] as const;
 
 export const addMonths = (from: string, months: number) => { const date = new Date(`${from}T12:00`); date.setMonth(date.getMonth() + months); return dateIso(date); };
 export const addDaysIso = (from: string, days: number) => { const date = new Date(`${from}T12:00`); date.setDate(date.getDate() + days); return dateIso(date); };

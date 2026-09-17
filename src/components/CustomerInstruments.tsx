@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
-import { CALIBRATION_PROVIDERS, CITIES, JOB_SETTINGS, customerMaster, customerSites, dayDifference, prettyDate, siteById, stamp } from "./erpMasters";
-import { findDuplicateInstrument, groupInstrumentsBySite, lastCalibrated, nextDueFor, openJobFor, updateStore, useErpStore, type CustodyEvent, type CustomerInstrument } from "./erpStore";
+import { CALIBRATION_PROVIDERS, CITIES, customerSites, dayDifference, prettyDate, siteById, stamp } from "./erpMasters";
+import { addDeliveryChallan, findDuplicateInstrument, groupInstrumentsBySite, lastCalibrated, nextDueFor, openJobFor, updateStore, useErpStore, type CustodyEvent, type CustomerInstrument } from "./erpStore";
 import { ActionMenu, Overlay, Pagination, useTablePage } from "./ErpUi";
 import "./customerInstruments.css";
 
-const blank = (id: string): CustomerInstrument => ({
-  id, customer: "", siteId: "", department: "", name: "", make: "", model: "", serial: "",
+const blank = (id: string, customer: string): CustomerInstrument => ({
+  id, customer, siteId: "", department: "", name: "", make: "", model: "", serial: "",
   range: "", accuracy: "", intervalMonths: undefined, procedure: "", notes: "",
   status: "Active", custody: "Customer site", history: [], calibrationRecorded: false,
 });
@@ -21,10 +21,14 @@ export function dueLabel(date?: string) {
   return { text: "", tone: "later" as const };
 }
 
-export default function CustomerInstruments({ openJob }: { openJob?: (jobId: string) => void }) {
-  const { instruments, jobs } = useErpStore();
+/** The instrument register, scoped to one customer — embedded as the "Instruments" section of
+ *  that customer's detail page in Customers.tsx. Everything here used to be its own full page
+ *  (browsing instruments across every customer); the customer picker is gone because the
+ *  customer is now fixed by whichever detail page is open. */
+export default function CustomerInstrumentsPanel({ customer, openJob }: { customer: string; openJob?: (jobId: string) => void }) {
+  const { instruments: allInstruments, jobs } = useErpStore();
+  const instruments = useMemo(() => allInstruments.filter((item) => item.customer === customer), [allInstruments, customer]);
   const [search, setSearch] = useState("");
-  const [customer, setCustomer] = useState("All customers");
   const [city, setCity] = useState("All cities");
   const [window_, setWindow] = useState("Any time");
   const [status, setStatus] = useState("Active");
@@ -37,24 +41,23 @@ export default function CustomerInstruments({ openJob }: { openJob?: (jobId: str
   const [picked, setPicked] = useState<string[]>([]);
   const [toast, setToast] = useState("");
   const flash = (message: string) => { setToast(message); window.setTimeout(() => setToast(""), 5000); };
-  const clearFilters = () => { setSearch(""); setCustomer("All customers"); setCity("All cities"); setWindow("Any time"); setStatus("All"); setCustody("All locations"); };
+  const clearFilters = () => { setSearch(""); setCity("All cities"); setWindow("Any time"); setStatus("All"); setCustody("All locations"); };
 
   const rows = useMemo(() => instruments.filter((item) => {
     const site = siteById(item.siteId);
     const due = nextDueFor(item);
     const diff = due ? dayDifference(due) : undefined;
     const inWindow = window_ === "Any time" || (window_ === "Not recorded" ? !due : diff !== undefined && (window_ === "Overdue" ? diff < 0 : window_ === "Next 7 days" ? diff >= 0 && diff <= 7 : window_ === "Next 30 days" ? diff >= 0 && diff <= 30 : diff >= 0 && diff <= 90));
-    return `${item.id} ${item.name} ${item.make} ${item.model} ${item.serial} ${item.customerAssetId ?? ""} ${item.customer} ${site?.name ?? ""}`.toLowerCase().includes(search.trim().toLowerCase())
-      && (customer === "All customers" || item.customer === customer)
+    return `${item.id} ${item.name} ${item.make} ${item.model} ${item.serial} ${item.customerAssetId ?? ""} ${site?.name ?? ""}`.toLowerCase().includes(search.trim().toLowerCase())
       && (city === "All cities" || site?.city === city)
       && (status === "All" || item.status === status)
       && (custody === "All locations" || item.custody === custody)
       && inWindow;
-  }).sort((a, b) => sort === "name" ? a.name.localeCompare(b.name) : sort === "customer" ? a.customer.localeCompare(b.customer) || a.siteId.localeCompare(b.siteId) : (nextDueFor(a) ?? "9999").localeCompare(nextDueFor(b) ?? "9999") || a.name.localeCompare(b.name)), [instruments, search, customer, city, window_, status, custody, sort]);
-  const filterKey = JSON.stringify([search, customer, city, window_, status, custody, sort]);
+  }).sort((a, b) => sort === "name" ? a.name.localeCompare(b.name) : sort === "site" ? a.siteId.localeCompare(b.siteId) : (nextDueFor(a) ?? "9999").localeCompare(nextDueFor(b) ?? "9999") || a.name.localeCompare(b.name)), [instruments, search, city, window_, status, custody, sort]);
+  const filterKey = JSON.stringify([search, city, window_, status, custody, sort]);
   const { pageRows, page, setPage } = useTablePage(rows, filterKey, 10);
   const allOnPagePicked = pageRows.length > 0 && pageRows.every((item) => picked.includes(item.id));
-  const activeFilters = [search.trim() && `Search: ${search.trim()}`, customer !== "All customers" && customer, city !== "All cities" && city, window_ !== "Any time" && window_, custody !== "All locations" && custodyName(custody as CustomerInstrument["custody"]), status !== "All" && `Status: ${status}`].filter(Boolean);
+  const activeFilters = [search.trim() && `Search: ${search.trim()}`, city !== "All cities" && city, window_ !== "Any time" && window_, custody !== "All locations" && custodyName(custody as CustomerInstrument["custody"]), status !== "All" && `Status: ${status}`].filter(Boolean);
   const counts = useMemo(() => ({
     overdue: instruments.filter((item) => item.status === "Active" && nextDueFor(item) && dayDifference(nextDueFor(item)!) < 0).length,
     dueWeek: instruments.filter((item) => item.status === "Active" && nextDueFor(item) && dayDifference(nextDueFor(item)!) >= 0 && dayDifference(nextDueFor(item)!) <= 7).length,
@@ -83,7 +86,7 @@ export default function CustomerInstruments({ openJob }: { openJob?: (jobId: str
         return {
           id: number, number, type: "Calibration" as const, customer: first.customer, siteId: first.siteId,
           instrumentIds: group.map((item) => item.id), stockIds: [], description: `Calibration of ${group.length} instrument${group.length === 1 ? "" : "s"}.`,
-          doneAt: "Customer site" as const, scheduledDate: "", slot: JOB_SETTINGS.defaultSlot, hours: group.length * 2,
+          doneAt: "Site visit" as const, scheduledDate: "", hours: group.length * 2,
           status: "Unassigned" as const, expectedSpares: [], usedSpares: [], results: [], travelNotes: "", photos: 0,
           activities: [{ title: `Job created for ${group.length} instrument${group.length === 1 ? "" : "s"}`, meta: stamp(), tone: "system" as const }],
         };
@@ -93,8 +96,8 @@ export default function CustomerInstruments({ openJob }: { openJob?: (jobId: str
     setPicked([]);
   };
 
-  return <section className="leads-page ci-page">
-    <div className="leads-heading"><div><p className="erp-secondary-text">Operations / Customer Instruments</p><h1>Customer Instruments</h1></div><div className="leads-actions"><button className="settings-outline" onClick={() => setImporting(true)}>Import CSV</button><button className="erp-action" onClick={() => setEditing(blank(nextInstrumentId(instruments)))}>+ Add instrument</button></div></div>
+  return <section className="ci-page">
+    <div className="settings-workspace-head"><div><h3>Instruments</h3><p>Instruments owned by this customer and their calibration history.</p></div><div className="leads-actions"><button className="settings-outline" onClick={() => setImporting(true)}>Import CSV</button><button className="erp-action" onClick={() => setEditing(blank(nextInstrumentId(allInstruments), customer))}>+ Add instrument</button></div></div>
     <div className="erp-summary-strip ci-summary">
       <button onClick={() => applySummary("overdue")}><span>Overdue calibration</span><b>{counts.overdue}</b></button>
       <button onClick={() => applySummary("week")}><span>Due in next 7 days</span><b>{counts.dueWeek}</b></button>
@@ -102,7 +105,6 @@ export default function CustomerInstruments({ openJob }: { openJob?: (jobId: str
     </div>
     <div className="erp-filters ci-register-filters">
       <label><span>Search instruments</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Name, serial, asset ID or site" /></label>
-      <label><span>Customer</span><select value={customer} onChange={(event) => setCustomer(event.target.value)}><option>All customers</option>{customerMaster.map((entry) => <option key={entry.name}>{entry.name}</option>)}</select></label>
       <label><span>Calibration due</span><select value={window_} onChange={(event) => setWindow(event.target.value)}>{["Any time", "Overdue", "Next 7 days", "Next 30 days", "Next 90 days", "Not recorded"].map((entry) => <option key={entry}>{entry}</option>)}</select></label>
       <label><span>Currently with</span><select value={custody} onChange={(event) => setCustody(event.target.value)}><option>All locations</option><option>Customer site</option><option value="In our lab">At SPM</option><option>In transit</option></select></label>
       <button className="settings-outline" aria-expanded={moreFilters} aria-controls="ci-more-filters" onClick={() => setMoreFilters(!moreFilters)}>More filters{city !== "All cities" || status !== "All" ? ` (${Number(city !== "All cities") + Number(status !== "All")})` : ""}</button>
@@ -111,15 +113,15 @@ export default function CustomerInstruments({ openJob }: { openJob?: (jobId: str
       <label><span>City</span><select value={city} onChange={(event) => setCity(event.target.value)}><option>All cities</option>{CITIES.map((entry) => <option key={entry}>{entry}</option>)}</select></label>
       <label><span>Contract status</span><select value={status} onChange={(event) => setStatus(event.target.value)}><option value="All">All statuses</option><option>Active</option><option>Contract ended</option></select></label>
     </div>}
-    <div className="erp-filter-summary ci-results"><div><b>{rows.length} instrument{rows.length === 1 ? "" : "s"}</b>{activeFilters.length > 0 && <><span>{activeFilters.join(" · ")}</span><button className="invoice-edit-link" onClick={clearFilters}>Clear all</button></>}</div><label><span>Sort by</span><select value={sort} onChange={(event) => setSort(event.target.value)}><option value="due">Calibration due</option><option value="name">Instrument name</option><option value="customer">Customer &amp; site</option></select></label></div>
+    <div className="erp-filter-summary ci-results"><div><b>{rows.length} instrument{rows.length === 1 ? "" : "s"}</b>{activeFilters.length > 0 && <><span>{activeFilters.join(" · ")}</span><button className="invoice-edit-link" onClick={clearFilters}>Clear all</button></>}</div><label><span>Sort by</span><select value={sort} onChange={(event) => setSort(event.target.value)}><option value="due">Calibration due</option><option value="name">Instrument name</option><option value="site">Site</option></select></label></div>
     {picked.length > 0 && <div className="cluster-bar ci-cluster-bar">
-      <span><b>{picked.length} selected</b>{picked.some((id) => !pageRows.some((item) => item.id === id)) ? " across pages or filters" : ""}{groups.length > 1 ? ` · ${groups.length} customer sites; one separate job per site` : groups.length === 1 ? ` · ${siteById(groups[0][0].siteId)?.name ?? groups[0][0].customer}` : ""}{endedCount > 0 ? ` · ${endedCount} ended contract${endedCount === 1 ? "" : "s"} excluded` : ""}</span>
+      <span><b>{picked.length} selected</b>{picked.some((id) => !pageRows.some((item) => item.id === id)) ? " across pages or filters" : ""}{groups.length > 1 ? ` · ${groups.length} sites; one separate job per site` : groups.length === 1 ? ` · ${siteById(groups[0][0].siteId)?.name ?? customer}` : ""}{endedCount > 0 ? ` · ${endedCount} ended contract${endedCount === 1 ? "" : "s"} excluded` : ""}</span>
       <div><button className="settings-outline" onClick={() => setPicked([])}>Clear selection</button><button className="erp-action" disabled={!groups.length} onClick={createJobs}>{groups.length > 1 ? `Create ${groups.length} jobs` : "Create job"}</button></div>
     </div>}
     {conflicts.length > 0 && <div className="ci-conflict-note"><b>{conflicts.length} already assigned; excluded from new jobs</b>{conflicts.map((item) => { const job = openJobFor(jobs, item.id)!; return <span key={item.id}>{item.name} · {openJob ? <button className="invoice-edit-link" onClick={() => openJob(job.id)}>{job.number}</button> : job.number}</span>; })}</div>}
-    <div className="erp-table-shell"><table className="erp-data-table ci-register"><colgroup><col style={{ width: 44 }} /><col style={{ width: "21%" }} /><col style={{ width: "14%" }} /><col style={{ width: "25%" }} /><col style={{ width: "12%" }} /><col style={{ width: "15%" }} /><col /></colgroup><thead><tr>
+    <div className="erp-table-shell"><table className="erp-data-table ci-register"><colgroup><col style={{ width: 44 }} /><col style={{ width: "25%" }} /><col style={{ width: "16%" }} /><col style={{ width: "22%" }} /><col style={{ width: "14%" }} /><col style={{ width: "17%" }} /><col /></colgroup><thead><tr>
       <th className="ci-selection-cell"><input type="checkbox" checked={allOnPagePicked} ref={(node) => { if (node) node.indeterminate = !allOnPagePicked && pageRows.some((item) => picked.includes(item.id)); }} onChange={(event) => setPicked((all) => event.target.checked ? [...new Set([...all, ...pageRows.map((item) => item.id)])] : all.filter((id) => !pageRows.some((item) => item.id === id)))} aria-label="Select instruments on this page" /></th>
-      <th>Instrument</th><th>Serial / Asset ID</th><th>Customer &amp; Site</th><th>Currently With</th><th>Calibration Due</th><th>Current Job</th>
+      <th>Instrument</th><th>Serial / Asset ID</th><th>Site</th><th>Currently With</th><th>Calibration Due</th><th>Current Job</th>
     </tr></thead><tbody>{pageRows.map((item) => {
       const site = siteById(item.siteId);
       const due = nextDueFor(item);
@@ -129,19 +131,19 @@ export default function CustomerInstruments({ openJob }: { openJob?: (jobId: str
         <td className="ci-selection-cell"><input type="checkbox" checked={picked.includes(item.id)} onChange={(event) => setPicked((all) => event.target.checked ? [...all, item.id] : all.filter((id) => id !== item.id))} aria-label={`Select ${item.name} ${item.serial || item.id}`} /></td>
         <td><button className="erp-record-link" onClick={() => setOpenId(item.id)}>{item.name}</button><small>{[item.make, item.model].filter(Boolean).join(" ") || "Make / model not recorded"}</small>{item.status === "Contract ended" && <small>Contract ended</small>}</td>
         <td><span className="ci-register-serial">{item.serial || item.customerAssetId || item.id}</span>{!item.serial && <small>Asset ID{!item.customerAssetId ? " · internal" : ""}</small>}</td>
-        <td><span>{item.customer}</span><small>{site?.name ?? "Site not recorded"}{site?.city ? ` · ${site.city}` : ""}</small></td>
+        <td><span>{site?.name ?? "Site not recorded"}</span>{site?.city && <small>{site.city}</small>}</td>
         <td>{custodyName(item.custody)}</td>
         <td><span className="ci-date">{due ? prettyDate(due) : "Not recorded"}</span>{due && when.text && <small className={`ci-due-note ci-due-note--${when.tone}`}>{when.text}</small>}</td>
         <td>{job ? <><button className="erp-record-link ci-date" onClick={() => openJob ? openJob(job.id) : setOpenId(item.id)}>{job.number}</button><small>{job.status}</small></> : <span className="erp-muted">—</span>}</td>
       </tr>;
-    })}</tbody></table>{!rows.length && <div className="settings-empty"><b>No instruments match these filters</b><p>Clear the filters to see the complete register.</p><button className="settings-outline" onClick={clearFilters}>Clear filters</button></div>}</div>
+    })}</tbody></table>{!rows.length && <div className="settings-empty"><b>No instruments match these filters</b><p>{instruments.length ? "Clear the filters to see the complete register." : "This customer has no instruments recorded yet."}</p>{instruments.length ? <button className="settings-outline" onClick={clearFilters}>Clear filters</button> : <button className="erp-action" onClick={() => setEditing(blank(nextInstrumentId(allInstruments), customer))}>+ Add instrument</button>}</div>}</div>
     <Pagination total={rows.length} page={page} onPage={setPage} pageSize={10} />
     {open && <InstrumentRecord instrument={open} jobs={jobs} close={() => setOpenId(null)} edit={() => { setEditing(open); setOpenId(null); }} openJob={openJob} flash={flash} />}
-    {editing && <InstrumentForm instrument={editing} all={instruments} save={(next) => {
+    {editing && <InstrumentForm instrument={editing} customer={customer} all={allInstruments} save={(next) => {
       updateStore((current) => ({ instruments: current.instruments.some((item) => item.id === next.id) ? current.instruments.map((item) => item.id === next.id ? next : item) : [next, ...current.instruments] }));
       setEditing(null); flash(`${next.name} saved.`);
     }} close={() => setEditing(null)} />}
-    {importing && <ImportCsv close={() => setImporting(false)} done={(count) => { setImporting(false); flash(`${count} instrument${count === 1 ? "" : "s"} imported. Unknown calibration dates remain unrecorded.`); }} />}
+    {importing && <ImportCsv customer={customer} close={() => setImporting(false)} done={(count) => { setImporting(false); flash(`${count} instrument${count === 1 ? "" : "s"} imported. Unknown calibration dates remain unrecorded.`); }} />}
     {toast && <div className="settings-toast" role="status">✓ {toast}</div>}
   </section>;
 }
@@ -154,8 +156,11 @@ function InstrumentRecord({ instrument, jobs, close, edit, openJob, flash }: { i
   const last = lastCalibrated(instrument);
   const returnToCustomer = () => {
     const log: CustodyEvent = { id: `cl-${Date.now()}`, at: stamp(), action: "Returned to customer", location: site?.name ?? instrument.customer };
-    updateStore((current) => ({ instruments: current.instruments.map((entry) => entry.id !== instrument.id ? entry : { ...entry, custody: "Customer site", receivedAt: undefined, condition: undefined, custodyLog: [log, ...(entry.custodyLog ?? [])] }) }));
-    close(); flash(`${instrument.name} marked as returned to ${instrument.customer}.`);
+    updateStore((current) => ({
+      instruments: current.instruments.map((entry) => entry.id !== instrument.id ? entry : { ...entry, custody: "Customer site", receivedAt: undefined, condition: undefined, custodyLog: [log, ...(entry.custodyLog ?? [])] }),
+      ...addDeliveryChallan(current, { customer: instrument.customer, siteId: instrument.siteId, reason: "Return", reference: instrument.id, lines: [{ description: instrument.name, serial: instrument.serial, quantity: 1 }] }),
+    }));
+    close(); flash(`${instrument.name} marked as returned to ${instrument.customer}. A delivery challan was created.`);
   };
   return <Overlay onClose={close} label={`${instrument.name} details`}><aside className="stock-detail due-drawer ci-record-drawer">
     <div className="settings-drawer-head ci-drawer-heading"><div><p>{instrument.id} · Customer instrument</p><h2>{instrument.name}</h2><p>{[instrument.make, instrument.model].filter(Boolean).join(" ")}</p></div><button onClick={close} aria-label="Close instrument details">×</button></div>
@@ -185,8 +190,8 @@ function InstrumentRecord({ instrument, jobs, close, edit, openJob, flash }: { i
   </aside></Overlay>;
 }
 
-function InstrumentForm({ instrument, all, close, save }: { instrument: CustomerInstrument; all: CustomerInstrument[]; close: () => void; save: (next: CustomerInstrument) => void }) {
-  const [doc, setDoc] = useState({ ...instrument, lastCalibrationDate: lastCalibrated(instrument) });
+function InstrumentForm({ instrument, customer, all, close, save }: { instrument: CustomerInstrument; customer: string; all: CustomerInstrument[]; close: () => void; save: (next: CustomerInstrument) => void }) {
+  const [doc, setDoc] = useState({ ...instrument, customer, lastCalibrationDate: lastCalibrated(instrument) });
   const [calibrationMode, setCalibrationMode] = useState(instrument.nextDueDate && !lastCalibrated(instrument) ? "due" : lastCalibrated(instrument) ? "last" : "none");
   const [correctingDue, setCorrectingDue] = useState(Boolean(instrument.nextDueDate));
   const [overrideDate, setOverrideDate] = useState(instrument.nextDueDate ?? "");
@@ -196,7 +201,7 @@ function InstrumentForm({ instrument, all, close, save }: { instrument: Customer
   const [error, setError] = useState("");
   useEffect(() => () => { if (certPreview) URL.revokeObjectURL(certPreview); }, [certPreview]);
   const change = <K extends keyof CustomerInstrument>(key: K, value: CustomerInstrument[K]) => setDoc((current) => ({ ...current, [key]: value }));
-  const sites = customerSites.filter((site) => site.customer === doc.customer);
+  const sites = customerSites.filter((site) => site.customer === customer);
   const suggestedDue = nextDueFor({ ...doc, nextDueDate: undefined });
   const effectiveDue = calibrationMode === "none" ? undefined : calibrationMode === "due" || correctingDue ? overrideDate || undefined : suggestedDue;
   const oldDue = nextDueFor(instrument);
@@ -204,7 +209,7 @@ function InstrumentForm({ instrument, all, close, save }: { instrument: Customer
   const changingDue = isExisting && !!oldDue && effectiveDue !== oldDue;
   const submit = (event: React.FormEvent) => {
     event.preventDefault();
-    if (!doc.customer || !doc.siteId || !doc.name.trim()) { setError("Select a customer and site, and enter an instrument name."); return; }
+    if (!doc.siteId || !doc.name.trim()) { setError("Select a site, and enter an instrument name."); return; }
     if (calibrationMode === "last" && !doc.lastCalibrationDate) { setError("Enter the last calibration date, or choose another calibration option."); return; }
     if ((calibrationMode === "due" || calibrationMode === "last" && correctingDue) && !overrideDate) { setError("Enter the next due date, or choose no calibration details available."); return; }
     if (doc.intervalMonths !== undefined && (!Number.isFinite(doc.intervalMonths) || doc.intervalMonths <= 0)) { setError("Enter an interval greater than zero, or leave it unknown."); return; }
@@ -226,11 +231,10 @@ function InstrumentForm({ instrument, all, close, save }: { instrument: Customer
     save(next);
   };
   return <Overlay onClose={close} label={isExisting ? "Edit instrument" : "Add instrument"}><form className="stock-move-modal ci-form-modal ci-scroll-modal" onSubmit={submit} noValidate>
-    <header className="ci-modal-heading"><div><h2>{isExisting ? "Edit instrument" : "Add instrument"}</h2>{isExisting && <p>{instrument.id}</p>}</div><button type="button" onClick={close} aria-label="Close instrument form">×</button></header>
+    <header className="ci-modal-heading"><div><h2>{isExisting ? "Edit instrument" : "Add instrument"}</h2><p>{customer}{isExisting ? ` · ${instrument.id}` : ""}</p></div><button type="button" onClick={close} aria-label="Close instrument form">×</button></header>
     <div className="ci-modal-body">
       <section className="ci-form-section erp-form-section"><h3>Basic details</h3><div className="quote-header-grid ci-form-grid">
-        <label><span>Customer <b className="lead-required">Required</b></span><select value={doc.customer} onChange={(event) => setDoc({ ...doc, customer: event.target.value, siteId: "" })}><option value="">Select customer</option>{customerMaster.map((entry) => <option key={entry.name}>{entry.name}</option>)}</select></label>
-        <label><span>Site <b className="lead-required">Required</b></span><select value={doc.siteId} disabled={!doc.customer} onChange={(event) => change("siteId", event.target.value)}><option value="">Select site</option>{sites.map((site) => <option key={site.id} value={site.id}>{site.name} · {site.city}</option>)}</select></label>
+        <label><span>Site <b className="lead-required">Required</b></span><select value={doc.siteId} onChange={(event) => change("siteId", event.target.value)}><option value="">Select site</option>{sites.map((site) => <option key={site.id} value={site.id}>{site.name} · {site.city}</option>)}</select></label>
         <label className="quote-grid-wide"><span>Instrument name <b className="lead-required">Required</b></span><input value={doc.name} onChange={(event) => change("name", event.target.value)} /></label>
         <label><span>Make</span><input value={doc.make} onChange={(event) => change("make", event.target.value)} /></label><label><span>Model</span><input value={doc.model} onChange={(event) => change("model", event.target.value)} /></label>
         <label><span>Serial number</span><input value={doc.serial} onChange={(event) => change("serial", event.target.value)} />{!doc.serial.trim() && <small>{isExisting ? `Internal asset ID: ${instrument.id}` : "An internal ID will be assigned on save."}</small>}</label><label><span>Customer asset ID (optional)</span><input value={doc.customerAssetId ?? ""} onChange={(event) => change("customerAssetId", event.target.value)} /></label>
@@ -269,9 +273,8 @@ function parseCsv(text: string): string[][] {
   return rows;
 }
 
-function ImportCsv({ close, done }: { close: () => void; done: (count: number) => void }) {
+function ImportCsv({ customer, close, done }: { customer: string; close: () => void; done: (count: number) => void }) {
   const { instruments } = useErpStore();
-  const [customer, setCustomer] = useState("");
   const [siteId, setSiteId] = useState("");
   const [rows, setRows] = useState<ImportRow[] | null>(null);
   const [error, setError] = useState("");
@@ -283,7 +286,7 @@ function ImportCsv({ close, done }: { close: () => void; done: (count: number) =
     if (!file) return;
     setError(""); setRows(null); setFileName(file.name);
     try {
-      const parsed = parseCsv((await file.text()).replace(/^\uFEFF/, ""));
+      const parsed = parseCsv((await file.text()).replace(/^﻿/, ""));
       const headers = parsed.shift()?.map((header) => header.toLowerCase().replace(/[^a-z]/g, "")) ?? [];
       const nameIndex = headers.findIndex((header) => ["instrument", "instrumentname", "name"].includes(header));
       if (nameIndex < 0 || !parsed.length) throw new Error("Include an Instrument column and at least one data row.");
@@ -307,7 +310,7 @@ function ImportCsv({ close, done }: { close: () => void; done: (count: number) =
     updateStore((current) => {
       const highest = Math.max(100, ...current.instruments.map((entry) => Number(entry.id.split("-").at(-1)) || 0));
       const created = clean.map((row, index): CustomerInstrument => ({
-        ...blank(`CI-${String(highest + index + 1).padStart(4, "0")}`), customer, siteId,
+        ...blank(`CI-${String(highest + index + 1).padStart(4, "0")}`, customer), siteId,
         name: row.name, make: row.make, model: row.model, serial: row.serial, department: row.department,
         intervalMonths: row.intervalMonths, lastCalibrationDate: row.lastCalibrated || undefined, calibrationRecorded: Boolean(row.lastCalibrated), notes: `Imported from ${fileName}.`,
       }));
@@ -317,9 +320,9 @@ function ImportCsv({ close, done }: { close: () => void; done: (count: number) =
   };
   return <Overlay onClose={close} label="Import instruments"><section className="stock-move-modal ci-import-modal ci-scroll-modal">
     <header className="ci-modal-heading"><h2>Import instruments</h2><button onClick={close} aria-label="Close import">×</button></header>
-    <div className="ci-modal-body"><p className="ci-form-helper">Select the customer and site, then preview a CSV before importing.</p><div className="quote-header-grid ci-form-grid">
-      <label><span>Customer (required)</span><select value={customer} onChange={(event) => { setCustomer(event.target.value); setSiteId(""); setRows(null); }}><option value="">Select customer</option>{customerMaster.map((entry) => <option key={entry.name}>{entry.name}</option>)}</select></label><label><span>Site (required)</span><select value={siteId} disabled={!customer} onChange={(event) => { setSiteId(event.target.value); setRows(null); }}><option value="">Select site</option>{sites.map((site) => <option key={site.id} value={site.id}>{site.name} · {site.city}</option>)}</select></label>
-      <label className="quote-grid-wide"><span>CSV file</span><input type="file" accept=".csv,text/csv" disabled={!customer || !siteId} onChange={chooseFile} />{(!customer || !siteId) && <small>Select customer and site first.</small>}</label>
+    <div className="ci-modal-body"><p className="ci-form-helper">Select the site, then preview a CSV before importing — all instruments will belong to {customer}.</p><div className="quote-header-grid ci-form-grid">
+      <label><span>Site (required)</span><select value={siteId} onChange={(event) => { setSiteId(event.target.value); setRows(null); }}><option value="">Select site</option>{sites.map((site) => <option key={site.id} value={site.id}>{site.name} · {site.city}</option>)}</select></label>
+      <label className="quote-grid-wide"><span>CSV file</span><input type="file" accept=".csv,text/csv" disabled={!siteId} onChange={chooseFile} />{!siteId && <small>Select a site first.</small>}</label>
     </div><p className="ci-form-helper">Columns: Instrument, Make, Model, Serial, Department, Last calibrated, Interval months. Use YYYY-MM-DD dates; unknown dates and intervals can be blank.</p>
       {rows && <><p className="ci-form-helper"><b>{clean.length} ready to import</b> · {rows.length - clean.length} need review and will be skipped</p><div className="erp-table-shell ci-import-preview"><table className="erp-data-table"><thead><tr><th>Instrument</th><th>Serial</th><th>Calibration</th><th>Review</th></tr></thead><tbody>{rows.map((row, index) => <tr key={index}><td>{row.name || "Missing name"}<small>{row.make} {row.model}</small></td><td>{row.serial || "Internal ID on save"}</td><td>{row.lastCalibrated || "Not recorded"}<small>{row.intervalMonths ? `${row.intervalMonths} months` : "Interval unknown"}</small></td><td>{row.errors.join("; ") || "Ready"}</td></tr>)}</tbody></table></div></>}
     </div><footer className="ci-modal-footer">{error && <p className="stock-count-error" role="alert">{error}</p>}<div><button className="settings-outline" onClick={close}>Cancel</button><button className="erp-action" onClick={confirm}>Import {clean.length || ""} instrument{clean.length === 1 ? "" : "s"}</button></div></footer>

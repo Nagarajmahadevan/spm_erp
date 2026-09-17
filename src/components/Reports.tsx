@@ -3,7 +3,7 @@ import { COMPANY, STOCK_LOCATIONS, engineers, dateIso, dayDifference, money, pre
 import {
   amcStatusFor, balanceAt, balanceOf, balanceStatus, engineerBalance, invoicePaymentStatus, invoiceReceiptsApplied, invoiceTdsRecorded,
   invoiceTotals, jobFullyResolved, nextVisit, onOrderFor, payableAppliedPayments, payableBalance, payablePaymentStatus, payableTdsRecorded,
-  totalOf, useErpStore, customerAdvance, customerPendingClearance, PAYABLE_CATEGORIES,
+  totalOf, useErpStore, customerAdvance, PAYABLE_CATEGORIES,
   type Individual, type Invoice, type Job, type PayableCategory, type Quantity,
 } from "./erpStore";
 import { buildDueItems } from "./DueDates";
@@ -132,8 +132,7 @@ function CustomerOutstandingReport({ store, openInvoice }: { store: Store; openI
     const tds = invoiceTdsRecorded(invoice.id, store.customerTds);
     const balance = balanceOf(invoice, store.customerReceipts, store.customerTds);
     const daysOverdue = Math.max(-dayDifference(invoice.dueDate), 0);
-    const pendingTds = store.customerTds.some((entry) => entry.invoiceId === invoice.id && entry.status === "Posted" && entry.verification === "Pending");
-    return { invoice, applied, tds, balance, daysOverdue, band: ageingBand(daysOverdue), pendingTds };
+    return { invoice, applied, tds, balance, daysOverdue, band: ageingBand(daysOverdue) };
   }).filter((row) => row.balance > 0.005), [store.invoices, store.customerReceipts, store.customerTds]);
 
   const rows = allRows.filter((row) => (filters.applied.customer === "All customers" || row.invoice.customer === filters.applied.customer) && (filters.applied.scope === "All Outstanding" || row.daysOverdue > 0) && (filters.applied.band === "All" || row.band === filters.applied.band));
@@ -150,7 +149,7 @@ function CustomerOutstandingReport({ store, openInvoice }: { store: Store; openI
   return <div className="reports-printable">
     <PrintHeader label="Customer Outstanding" scope={scope} />
     <div className="reports-mini-stats"><span>Total Outstanding <b>{money(totals.outstanding)}</b></span><span>Overdue Amount <b className={totals.overdue > 0.005 ? "reports-figure--overdue" : ""}>{money(totals.overdue)}</b></span><span>Customers With Balance <b>{customersWithBalance}</b></span></div>
-    {totalAdvance > 0.005 && <p className="reports-note">{money(totalAdvance)} in unapplied customer advances across all customers — not netted against the balances below. See Accounts → Customer Outstanding.</p>}
+    {totalAdvance > 0.005 && <p className="reports-note">{money(totalAdvance)} in unapplied customer advances across all customers — not netted against the balances below. See Accounts → Receivables.</p>}
     <div className="erp-filters reports-filters">
       <label><span>Customer</span><select value={filters.draft.customer} onChange={(event) => filters.setDraft({ customer: event.target.value })}><option>All customers</option>{customers.map((customer) => <option key={customer}>{customer}</option>)}</select></label>
       <label><span>Show</span><select value={filters.draft.scope} onChange={(event) => filters.setDraft({ scope: event.target.value as typeof filters.draft.scope })}><option>All Outstanding</option><option>Overdue</option></select></label>
@@ -165,7 +164,7 @@ function CustomerOutstandingReport({ store, openInvoice }: { store: Store; openI
       <td>{prettyDate(row.invoice.dueDate)}</td>
       <td className="number">{money(invoiceTotals(row.invoice).grandTotal)}</td>
       <td className="number">{row.applied > 0.005 ? money(row.applied) : <span className="erp-muted">—</span>}</td>
-      <td className="number">{row.tds > 0.005 ? money(row.tds) : <span className="erp-muted">—</span>}{row.pendingTds && <small className="reports-pending-chip">Verification pending</small>}</td>
+      <td className="number">{row.tds > 0.005 ? money(row.tds) : <span className="erp-muted">—</span>}</td>
       <td className="number"><b>{money(row.balance)}</b></td>
       <td className="number">{row.daysOverdue > 0 ? <span className="reports-figure--overdue">{row.daysOverdue}d</span> : <span className="erp-muted">—</span>}</td>
     </tr>)}</tbody></table>{!sorted.length && <EmptyState hasAny={allRows.length > 0} itemLabel="outstanding invoices" />}</div>
@@ -228,10 +227,9 @@ function ReceiptsPaymentsReport({ store, openInvoice }: { store: Store; openInvo
     && (filters.applied.mode === "All modes" || row.mode === filters.applied.mode));
   const { pageRows, page, setPage } = useTablePage(rows, JSON.stringify(filters.applied));
 
-  // Reversed entries are kept visible for audit but are not valid posted transactions, so they
-  // never count. Uncleared cheques are tracked (so nobody double-enters them) but are not yet
-  // real collections either.
-  const totals = rows.reduce((sum, row) => row.status === "Reversed" ? sum : ({ in: sum.in + (row.status === "Pending Clearance" ? 0 : row.moneyIn), out: sum.out + row.moneyOut }), { in: 0, out: 0 });
+  // A reversed engineer advance is kept visible for audit but is not a valid transaction, so it
+  // never counts.
+  const totals = rows.reduce((sum, row) => row.status === "Reversed" ? sum : ({ in: sum.in + row.moneyIn, out: sum.out + row.moneyOut }), { in: 0, out: 0 });
   const net = totals.in - totals.out;
   const scope = `${prettyDate(filters.applied.from)} – ${prettyDate(filters.applied.to)}${filters.applied.type !== "All" ? ` · ${filters.applied.type}` : ""}${filters.applied.party !== "All parties" ? ` · ${filters.applied.party}` : ""}${filters.applied.mode !== "All modes" ? ` · ${filters.applied.mode}` : ""}`;
   const exportRows = () => exportCsv(`receipts-and-payments-${dateIso()}.csv`, ["Date", "Party", "Type", "Linked", "Mode", "Reference", "Money In", "Money Out", "Status"],
@@ -240,7 +238,7 @@ function ReceiptsPaymentsReport({ store, openInvoice }: { store: Store; openInvo
   return <div className="reports-printable">
     <PrintHeader label="Receipts &amp; Payments" scope={scope} />
     <div className="reports-mini-stats"><span>Money Received <b className="reports-figure--in">{money(totals.in)}</b></span><span>Money Paid <b className="reports-figure--out">{money(totals.out)}</b></span><span>Net Movement <b>{money(net)}</b></span></div>
-    <p className="reports-note">Cheques still pending clearance are shown but excluded from Money Received. "Net movement" is the difference above, not a bank balance.</p>
+    <p className="reports-note">"Net movement" is the difference above, not a bank balance.</p>
     <div className="erp-filters reports-filters">
       <label><span>From</span><input type="date" value={filters.draft.from} onChange={(event) => filters.setDraft({ from: event.target.value })} /></label>
       <label><span>To</span><input type="date" value={filters.draft.to} onChange={(event) => filters.setDraft({ to: event.target.value })} /></label>
@@ -262,10 +260,10 @@ function ReceiptsPaymentsReport({ store, openInvoice }: { store: Store; openInvo
 
 /* ─── D. Bills Due ────────────────────────────────────────────────── */
 function BillsDueReport({ store }: { store: Store }) {
-  const payees = useMemo(() => [...new Set(store.payables.filter((bill) => bill.status === "Posted").map((bill) => bill.payee))].sort(), [store.payables]);
+  const payees = useMemo(() => [...new Set(store.payables.map((bill) => bill.payee))].sort(), [store.payables]);
   const filters = useReportFilters("bills-due", { payee: "All payees", category: "All" as "All" | PayableCategory, scope: "All unpaid" as "All unpaid" | "Overdue" | "Due in next 7 days" });
 
-  const allRows = useMemo(() => store.payables.filter((bill) => bill.status === "Posted").map((bill) => ({
+  const allRows = useMemo(() => store.payables.map((bill) => ({
     bill, balance: payableBalance(bill, store.supplierPayments), applied: payableAppliedPayments(bill.id, store.supplierPayments), tds: payableTdsRecorded(bill.id, store.supplierPayments),
     overdue: dayDifference(bill.dueDate) < 0, dueSoon: dayDifference(bill.dueDate) >= 0 && dayDifference(bill.dueDate) <= 7,
   })).filter((row) => row.balance > 0.005), [store.payables, store.supplierPayments]);
@@ -419,7 +417,7 @@ function followUpFor(job: Job): string {
 }
 function JobSummaryReport({ store, openJob }: { store: Store; openJob?: (jobId: string) => void }) {
   const customers = useMemo(() => [...new Set(store.jobs.map((job) => job.customer))].sort(), [store.jobs]);
-  const jobEngineers = useMemo(() => [...new Set(store.jobs.flatMap((job) => [job.engineer, ...(job.additionalEngineers ?? [])].filter(Boolean) as string[]))].sort(), [store.jobs]);
+  const jobEngineers = useMemo(() => [...new Set(store.jobs.map((job) => job.engineer).filter(Boolean) as string[])].sort(), [store.jobs]);
   const statuses = useMemo(() => [...new Set(store.jobs.map((job) => job.status))].sort(), [store.jobs]);
   const filters = useReportFilters("job-summary", { basis: "Scheduled Date" as "Scheduled Date" | "Completed Date", from: THIS_MONTH.from, to: THIS_MONTH.to, status: "All", engineer: "All engineers", customer: "All customers" });
 
@@ -429,7 +427,7 @@ function JobSummaryReport({ store, openJob }: { store: Store; openJob?: (jobId: 
     return date >= filters.applied.from && date <= filters.applied.to;
   };
   const rows = store.jobs.filter((job) => inRange(job) && (filters.applied.status === "All" || job.status === filters.applied.status)
-    && (filters.applied.engineer === "All engineers" || job.engineer === filters.applied.engineer || job.additionalEngineers?.includes(filters.applied.engineer))
+    && (filters.applied.engineer === "All engineers" || job.engineer === filters.applied.engineer)
     && (filters.applied.customer === "All customers" || job.customer === filters.applied.customer))
     .sort((a, b) => (filters.applied.basis === "Scheduled Date" ? b.scheduledDate.localeCompare(a.scheduledDate) : (b.completedAt ?? "").localeCompare(a.completedAt ?? "")));
   const { pageRows, page, setPage } = useTablePage(rows, JSON.stringify(filters.applied));
@@ -442,7 +440,7 @@ function JobSummaryReport({ store, openJob }: { store: Store; openJob?: (jobId: 
   };
   const scope = `${prettyDate(filters.applied.from)} – ${prettyDate(filters.applied.to)} by ${filters.applied.basis}${filters.applied.status !== "All" ? ` · ${filters.applied.status}` : ""}${filters.applied.engineer !== "All engineers" ? ` · ${filters.applied.engineer}` : ""}${filters.applied.customer !== "All customers" ? ` · ${filters.applied.customer}` : ""}`;
   const exportRows = () => exportCsv(`job-summary-${dateIso()}.csv`, ["Job Number", "Type", "Customer", "Site", "Engineers", "Scheduled Date", "Status", "Completed Date", "Follow-up"],
-    rows.map((job) => [job.number, job.type, job.customer, job.siteId, [job.engineer, ...(job.additionalEngineers ?? [])].filter(Boolean).join("; ") || "Unassigned", prettyDate(job.scheduledDate), job.status, job.completedAt ? prettyDate(job.completedAt) : "", followUpFor(job)]));
+    rows.map((job) => [job.number, job.type, job.customer, job.siteId, job.engineer || "Unassigned", prettyDate(job.scheduledDate), job.status, job.completedAt ? prettyDate(job.completedAt) : "", followUpFor(job)]));
 
   return <div className="reports-printable">
     <PrintHeader label="Job Summary" scope={scope} />
@@ -460,7 +458,7 @@ function JobSummaryReport({ store, openJob }: { store: Store; openJob?: (jobId: 
     <div className="erp-table-shell"><table className="erp-data-table reports-table"><thead><tr><th>Job</th><th>Customer / Site</th><th>Engineer(s)</th><th>Scheduled</th><th>Status</th><th>Completed</th><th>Follow-up</th></tr></thead><tbody>{pageRows.map((job) => <tr key={job.id}>
       <td><button className="erp-record-link" onClick={() => openJob?.(job.id)}>{job.number}</button><small>{job.type}</small></td>
       <td>{job.customer}<small>{job.siteId}</small></td>
-      <td>{[job.engineer, ...(job.additionalEngineers ?? [])].filter(Boolean).join(", ") || <span className="erp-muted">Unassigned</span>}</td>
+      <td>{job.engineer || <span className="erp-muted">Unassigned</span>}</td>
       <td>{prettyDate(job.scheduledDate)}</td>
       <td><span className={`job-status job-status--${job.status.toLowerCase().replace(/ /g, "-")}`}>{job.status}</span></td>
       <td>{job.completedAt ? prettyDate(job.completedAt) : <span className="erp-muted">—</span>}</td>
