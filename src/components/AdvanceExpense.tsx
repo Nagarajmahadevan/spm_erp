@@ -198,7 +198,7 @@ function ExpenseDrawer({ store, expense, close, flash }: { store: Store; expense
     <div className="settings-drawer-head"><div><p>{expense.id} · {expense.status}</p><h2>{expense.engineer}</h2></div><button onClick={close} aria-label="Close expense review">×</button></div>
     <div className="expense-drawer-body expense-review-layout">
       <section className="expense-bill-pane"><h3>Bill</h3>
-        {expense.billFiles.length ? <div className="expense-bill-files">{expense.billFiles.map((file, index) => file.startsWith("blob:") ? <a key={index} href={file} target="_blank" rel="noreferrer"><img src={file} alt={`Bill ${index + 1}`} /></a> : <div key={index} className="expense-bill-mock"><span>📎</span><small>{file}</small><em>Mock attachment — not stored in this prototype</em></div>)}</div>
+        {expense.billFiles.length ? <div className="expense-bill-files">{expense.billFiles.map((file, index) => file.startsWith("blob:") ? <a key={index} href={file} target="_blank" rel="noreferrer"><img src={file} alt={`Bill ${index + 1}`} /></a> : <div key={index} className="expense-bill-mock"><span>📎</span><small>{file}</small><em>Attachment on file — preview isn't available</em></div>)}</div>
           : <p className="expense-warning">Bill unavailable{expense.billMissingReason ? `: ${expense.billMissingReason}` : "."}</p>}
       </section>
       <section className="expense-detail-pane">

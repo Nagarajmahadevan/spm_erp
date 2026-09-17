@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import spmLogo from "@/imports/SPM_Logo.png";
-import { COMPANY, INDIAN_STATES, customerMaster, stockCatalog, initialQuotes, money, stamp, dateIso, dayDifference, prettyDate, lineValue, totalsFor, numberWords, type Quote } from "./erpMasters";
+import { COMPANY, INDIAN_STATES, customerMaster, stockCatalog, money, stamp, dateIso, dayDifference, prettyDate, lineValue, totalsFor, numberWords, type Quote } from "./erpMasters";
 import { balanceOf, invoicePaymentStatus, invoiceReceiptsApplied, invoiceStatusFor as statusFor, invoiceTdsRecorded, invoiceTotals, updateStore, useErpStore, type Invoice, type InvoiceDisplayStatus as DisplayStatus, type InvoiceLine, type InvoiceActivity } from "./erpStore";
 import { RecordReceipt } from "./Accounts";
 
@@ -23,7 +23,7 @@ function dueLabel(invoice: Invoice, paid: boolean) {
   if (diff === 0) return `${prettyDate(invoice.dueDate)} · today`;
   return prettyDate(invoice.dueDate);
 }
-function nextNumber(invoices: Invoice[]) {
+export function nextNumber(invoices: Invoice[]) {
   const highest = Math.max(INVOICE_SERIES.next - 1, ...invoices.map((invoice) => Number(invoice.number.split("-").at(-1)) || 0));
   return `${INVOICE_SERIES.prefix}${String(highest + 1).padStart(4, "0")}`;
 }
@@ -41,7 +41,7 @@ function blockers(invoice: Invoice) {
   return list;
 }
 
-function invoiceFromQuote(quote: Quote, number: string): Invoice {
+export function invoiceFromQuote(quote: Quote, number: string): Invoice {
   const invoiceDate = dateIso();
   return {
     id: number, number, customer: quote.customer, contact: quote.contact, customerGstin: quote.customerGstin, customerState: quote.customerState,
@@ -69,7 +69,7 @@ function blankInvoice(number: string): Invoice {
 
 export default function Invoices({ focusInvoice }: { focusInvoice?: string } = {}) {
   const store = useErpStore();
-  const { invoices, customerReceipts, customerTds } = store;
+  const { invoices, customerReceipts, customerTds, quotes } = store;
   const setInvoices = (change: (all: Invoice[]) => Invoice[]) => updateStore((current) => ({ invoices: change(current.invoices) }));
   const [search, setSearch] = useState(""); const [status, setStatus] = useState("All invoices");
   const [editorId, setEditorId] = useState<string | null>(focusInvoice ?? null); const [choosing, setChoosing] = useState(false); const [toast, setToast] = useState("");
@@ -134,13 +134,13 @@ export default function Invoices({ focusInvoice }: { focusInvoice?: string } = {
       {!filtered.length && <div className="settings-empty"><b>{invoices.length ? "No invoices match what you typed" : "No invoices yet"}</b><p>{invoices.length ? "Clear the search box or pick a different status." : "Most invoices start from an accepted quotation — we will fill in the customer, items and taxes for you."}</p><button className="erp-action" onClick={() => setChoosing(true)}>+ New invoice</button></div>}
     </div>
 
-    {choosing && <StartInvoice close={() => setChoosing(false)} fromQuote={startFromQuote} blank={startBlank} />}
+    {choosing && <StartInvoice close={() => setChoosing(false)} fromQuote={startFromQuote} blank={startBlank} quotes={quotes} />}
     {toast && <div className="settings-toast" role="status">✓ {toast}</div>}
   </section>;
 }
 
-function StartInvoice({ close, fromQuote, blank }: { close: () => void; fromQuote: (quote: Quote) => void; blank: () => void }) {
-  const accepted = initialQuotes.filter((quote) => quote.status === "Accepted");
+function StartInvoice({ close, fromQuote, blank, quotes }: { close: () => void; fromQuote: (quote: Quote) => void; blank: () => void; quotes: Quote[] }) {
+  const accepted = quotes.filter((quote) => quote.status === "Accepted");
   return <div className="stock-modal-backdrop" onClick={close}><section className="stock-move-modal invoice-start-modal" role="dialog" aria-modal="true" aria-labelledby="start-invoice-title" onClick={(event) => event.stopPropagation()}>
     <button className="stock-modal-close" onClick={close} aria-label="Close">×</button>
     <h2 id="start-invoice-title">Start from an accepted quotation?</h2>

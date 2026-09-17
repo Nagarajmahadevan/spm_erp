@@ -2,7 +2,7 @@
 // a PO that is still awaiting delivery shows as "On order" in Stock, and receiving a PO
 // puts the goods on the shelf without anyone re-keying them.
 import { useSyncExternalStore } from "react";
-import { APPROVER, ATTENDANCE_SETTINGS, COMPANY, JOB_SETTINGS, JOB_TYPE_SKILL, SLOT_TIMES, WAREHOUSE, addDaysIso, addMonths, dateIso, dayDifference, isoDateInIst, isWeeklyOff, engineers, customerSites, metersBetween, minutesToTime, nowIso, prettyDate, stamp, timeToMinutes, totalsFor } from "./erpMasters";
+import { APPROVER, ATTENDANCE_SETTINGS, COMPANY, JOB_SETTINGS, JOB_TYPE_SKILL, SLOT_TIMES, WAREHOUSE, addDaysIso, addMonths, dateIso, dayDifference, isoDateInIst, isWeeklyOff, engineers, customerSites, metersBetween, minutesToTime, nowIso, prettyDate, stamp, timeToMinutes, totalsFor, initialQuotes, type Quote } from "./erpMasters";
 
 // Equipment SPM owns and tracks unit by unit. Ownership (always SPM here), current holder,
 // operational status and calibration are kept as separate facts — a unit with an engineer
@@ -952,6 +952,36 @@ export function duplicateReference(payments: ExpensePayment[], reference: string
   return payments.filter((p) => p.id !== excludeId && p.status !== "Reversed" && p.reference?.trim().toLowerCase() === reference.trim().toLowerCase());
 }
 
+// Sales pipeline, ahead of a quotation existing. A lead's `stage` and a linked quotation's
+// `status` are tracked separately — creating a quotation moves a lead to "Quoted" but the
+// quotation itself still goes through its own Draft → Sent → Accepted workflow.
+export type LeadStage = "New" | "Contacted" | "Quoted" | "Won" | "Lost";
+export type LeadSource = "Website" | "Phone" | "WhatsApp" | "Email" | "Referral";
+export type LeadActivity = { title: string; meta: string; tone?: "call" | "deal" | "lost" };
+export type WonCustomerRef = { name: string; code: string };
+export type Lead = {
+  id: string;
+  name: string;
+  company: string;
+  phone: string;
+  email: string;
+  city: string;
+  source: LeadSource;
+  enquiry: string;
+  stage: LeadStage;
+  followUpAt?: string;
+  assigned: string;
+  auto?: boolean;
+  interestedIn?: string;
+  value?: string;
+  decision?: string;
+  customer?: WonCustomerRef;
+  lostReason?: string;
+  lostNote?: string;
+  lostDate?: string;
+  activities?: LeadActivity[];
+};
+
 type Store = {
   individuals: Individual[]; quantities: Quantity[]; orders: PurchaseOrder[]; moves: StockMove[]; invoices: Invoice[];
   contracts: AmcContract[]; bills: CompanyBill[]; masters: Master[]; statutoryPaid: Record<string, PaymentRecord>;
@@ -960,6 +990,7 @@ type Store = {
   expenses: Expense[]; advancePayments: ExpensePayment[];
   customerReceipts: CustomerReceipt[]; customerTds: CustomerTds[];
   payables: Payable[]; supplierPayments: SupplierPayment[];
+  leads: Lead[]; quotes: Quote[];
 };
 
 // ─── Advance & Expense actions ──────────────────────────────────────────────
@@ -1026,7 +1057,7 @@ let state: Store = {
   ],
   holidays: [
     { id: "HOL-1", date: "2026-10-02", name: "Gandhi Jayanti" },
-    { id: "HOL-2", date: "2026-09-25", name: "Sample company holiday — confirm with SPM" },
+    { id: "HOL-2", date: "2026-09-25", name: "Company holiday" },
   ],
   attendance: [
     { id: "att-seed-1", engineer: "Nikhil Rao", date: "2026-09-17", kind: "Office check-in", source: "Biometric", at: "2026-09-17T03:20:00.000Z", syncedAt: "2026-09-17T03:20:00.000Z", sourceEventId: "BIO-0917-NR-IN" },
@@ -1169,7 +1200,38 @@ let state: Store = {
     { id: "SP-002", billId: "BILL-OTH", date: "2026-09-12", amount: 20000, mode: "Bank", reference: "BRK/NEFT/331", tds: 2000, recordedBy: "Arun Kumar", recordedAt: "12 Sep 2026 · 04:00 PM", status: "Posted" },
     { id: "SP-003", billId: "BILL-MISTAKE", date: "2026-09-08", amount: 15000, mode: "Cash", recordedBy: "Priya Shah", recordedAt: "08 Sep 2026 · 09:40 AM", status: "Reversed", reversedReason: "Recorded against the wrong vendor bill by mistake — payment was actually for a different Nanotech Supplies invoice.", reversedBy: "Arun Kumar", reversedAt: "09 Sep 2026 · 10:00 AM" },
   ],
+
+  leads: [
+    { id: "LD-1048", name: "Rhea Mehta", company: "Nova Instruments", phone: "+91 98450 22110", email: "rhea@novainstruments.in", city: "Bengaluru", source: "Website", enquiry: "Need an AFM probe station for a new materials lab.", stage: "New", followUpAt: "2026-09-15T10:30", assigned: "Arun Kumar", auto: true, interestedIn: "AFM probe station", value: "₹ 6.40 L", decision: "2026-09-30" },
+    { id: "LD-1047", name: "Dev Malhotra", company: "Arka Diagnostics", phone: "+91 98204 81291", email: "dev@arkadiagnostics.in", city: "Mumbai", source: "Phone", enquiry: "Looking for annual calibration support for two instruments.", stage: "Contacted", followUpAt: "2026-09-15T14:00", assigned: "Priya Shah", interestedIn: "Annual calibration support", value: "₹ 1.85 L", decision: "2026-09-22" },
+    { id: "LD-1046", name: "Kiran Rao", company: "Helix Labs", phone: "+91 99805 77722", email: "kiran@helixlabs.com", city: "Hyderabad", source: "WhatsApp", enquiry: "Quotation requested for optical microscopy accessories.", stage: "Quoted", followUpAt: "2026-09-13T10:30", assigned: "Arun Kumar", interestedIn: "Optical microscopy accessories", value: "₹ 74,000", decision: "2026-09-18" },
+    { id: "LD-1045", name: "Sana Iyer", company: "Tera Research", phone: "+91 97040 10888", email: "sana@teraresearch.com", city: "Chennai", source: "Referral", enquiry: "Surface profilometer demo for semiconductor applications.", stage: "Won", assigned: "Priya Shah", interestedIn: "Surface profilometer", value: "₹ 12.2 L", decision: "2026-09-10", customer: { name: "Tera Research", code: "CUS-2037" } },
+  ],
+  quotes: initialQuotes,
 };
+
+// Untouched seed snapshot, kept for "Reset demo data" — captured before any persisted data
+// is loaded over it, so a reset always returns to the same starting point regardless of
+// what has since been saved.
+const initialState: Store = structuredClone(state);
+
+const STORAGE_KEY = "spm-erp-store";
+function loadPersistedState(): Store {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return initialState;
+    return { ...initialState, ...JSON.parse(raw) };
+  } catch {
+    return initialState;
+  }
+}
+state = loadPersistedState();
+
+export function resetStore() {
+  state = structuredClone(initialState);
+  try { localStorage.removeItem(STORAGE_KEY); } catch {}
+  listeners.forEach((listener) => listener());
+}
 
 const listeners = new Set<() => void>();
 const subscribe = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
@@ -1178,6 +1240,7 @@ const snapshot = () => state;
 export function useErpStore() { return useSyncExternalStore(subscribe, snapshot, snapshot); }
 export function updateStore(change: (current: Store) => Partial<Store>) {
   state = { ...state, ...change(state) };
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch {}
   listeners.forEach((listener) => listener());
 }
 

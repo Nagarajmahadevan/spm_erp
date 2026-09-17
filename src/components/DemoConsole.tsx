@@ -54,10 +54,10 @@ export default function DemoConsole({ jobs }: { jobs: Job[] }) {
 
   return <div className="demo-console">
     <button className="demo-console-toggle" onClick={() => setOpen((value) => !value)}>
-      <span className="demo-tag">Demo</span> Simulate field &amp; biometric events {open ? "▲" : "▼"}
+      Log a check-in or checkout {open ? "▲" : "▼"}
     </button>
     {open && <div className="demo-console-panel">
-      <p className="demo-console-note">Stands in for the mobile app and office biometric device — neither is built yet. Nothing here is a real integration.</p>
+      <p className="demo-console-note">Use this to record a check-in or checkout by hand until the mobile app and biometric device are connected.</p>
       <div className="settings-tabs"><button className={tab === "site" ? "is-active" : ""} onClick={() => setTab("site")}>Site visit event</button><button className={tab === "office" ? "is-active" : ""} onClick={() => setTab("office")}>Office biometric event</button></div>
 
       {tab === "site" ? <div className="demo-console-grid">

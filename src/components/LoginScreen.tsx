@@ -1,4 +1,5 @@
 import { FormEvent, useState } from "react";
+import { useNavigate } from "react-router";
 import spmLogo from "@/imports/SPM_Logo.png";
 
 function FieldIcon({ type }: { type: "email" | "lock" | "eye" }) {
@@ -14,6 +15,7 @@ export default function LoginScreen() {
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [notice, setNotice] = useState("");
+  const navigate = useNavigate();
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -21,7 +23,7 @@ export default function LoginScreen() {
     setLoading(true);
     window.setTimeout(() => {
       setLoading(false);
-      setNotice("Signed in successfully. Your ERP workspace is opening.");
+      navigate("/", { replace: true });
     }, 700);
   };
 

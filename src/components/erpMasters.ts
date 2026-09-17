@@ -63,9 +63,7 @@ export const stockCatalog: StockOption[] = [
 
 export const money = (value: number) => new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 0 }).format(value);
 export const initials = (name: string) => name.split(" ").map((part) => part[0]).join("");
-export const DEMO_NOW = "2026-09-17T06:00:00.000Z"; // 17 Sep 2026, 11:30 IST
-export const stamp = () => "17 Sep 2026 · 11:30 AM · Arun Kumar";
-export const dateIso = (date = new Date("2026-09-17T12:00:00")) => {
+export const dateIso = (date = new Date()) => {
   const offset = date.getTimezoneOffset();
   return new Date(date.getTime() - offset * 60_000).toISOString().slice(0, 10);
 };
@@ -80,12 +78,13 @@ export function prettyDate(value: string) { if (!value) return "Not scheduled"; 
 
 // IST time display. Attendance and job-visit timestamps are stored as full ISO instants;
 // every screen renders them in IST regardless of the viewer's own timezone.
-export const nowIso = () => DEMO_NOW;
+export const nowIso = () => new Date().toISOString();
 export function istTime(iso: string) { return new Intl.DateTimeFormat("en-IN", { hour: "2-digit", minute: "2-digit", hour12: true, timeZone: "Asia/Kolkata" }).format(new Date(iso)); }
 export function istDate(iso: string) { return new Intl.DateTimeFormat("en-IN", { day: "2-digit", month: "short", year: "numeric", timeZone: "Asia/Kolkata" }).format(new Date(iso)); }
 export function istStamp(iso: string) { return `${istDate(iso)} · ${istTime(iso)}`; }
 /** yyyy-mm-dd calendar date an instant falls on in IST — the day an attendance event counts toward. */
 export function isoDateInIst(iso: string) { return new Intl.DateTimeFormat("en-CA", { year: "numeric", month: "2-digit", day: "2-digit", timeZone: "Asia/Kolkata" }).format(new Date(iso)); }
+export const stamp = () => `${istStamp(nowIso())} · Arun Kumar`;
 
 // Slot → clock-time mapping and 24h/12h helpers, used for schedule capacity and visit windows.
 export const SLOT_TIMES: Record<"Morning" | "Afternoon" | "Full day", { start: string; end: string }> = {
@@ -137,7 +136,7 @@ export const initialQuotes: Quote[] = [
   { id: "QT-2026-0838-R1", number: "QT-2026-0838", revision: 1, customer: "Vector Bio Labs", contact: "Nikhil Arora", customerGstin: "27AABCV8041G1ZQ", customerState: "Maharashtra", billingAddress: "88, MIDC Andheri East, Mumbai, Maharashtra 400093", shippingAddress: "88, MIDC Andheri East, Mumbai, Maharashtra 400093", paymentTerms: "Net 45", quoteDate: "2026-09-12", validUntil: "2026-09-21", owner: "Priya Shah", subject: "Temperature controller", status: "Sent", sentAt: "12 Sep 2026", items: [{ id: "vector-1", item: "Digital temperature controller", description: "PID digital temperature controller", hsn: "9032", quantity: 1, unit: "Nos", rate: 128500, discount: 0, gst: 18, inStock: false }], terms: DEFAULT_TERMS, deliveryPeriod: "3 weeks", warranty: "12 months" },
   { id: "QT-2026-0835-R1", number: "QT-2026-0835", revision: 1, customer: "Arka Diagnostics", contact: "Meera Nair", customerGstin: "29AAECA5512M1Z3", customerState: "Karnataka", billingAddress: "44, Peenya Industrial Area, Bengaluru, Karnataka 560058", shippingAddress: "44, Peenya Industrial Area, Bengaluru, Karnataka 560058", paymentTerms: "Net 30", quoteDate: "2026-09-08", validUntil: "2026-09-22", owner: "Arun Kumar", subject: "Optical microscope MX-5", status: "Accepted", sentAt: "08 Sep 2026", acceptedPo: "ARK/PO/2026/077", acceptedDate: "12 Sep 2026", items: [{ id: "arka-1", item: "Optical Microscope MX-5", description: "Optical microscope with 5 MP imaging", hsn: "9011", quantity: 1, unit: "Nos", rate: 215000, discount: 0, gst: 18, inStock: true }, { id: "arka-2", item: "Vacuum seal kit", description: "Vacuum seal maintenance kit", hsn: "8484", quantity: 2, unit: "Set", rate: 12400, discount: 0, gst: 18, inStock: true }], terms: DEFAULT_TERMS, deliveryPeriod: "1 week", warranty: "12 months" },
   { id: "QT-2026-0831-R1", number: "QT-2026-0831", revision: 1, customer: "Helix Labs", contact: "Kiran Rao", customerGstin: "36AABCH2119P1Z5", customerState: "Telangana", billingAddress: "Plot 7, Genome Valley, Hyderabad, Telangana 500078", shippingAddress: "Plot 7, Genome Valley, Hyderabad, Telangana 500078", paymentTerms: "Net 15", quoteDate: "2026-09-05", validUntil: "2026-09-19", owner: "Priya Shah", subject: "AFM probe tips — annual supply", status: "Accepted", sentAt: "05 Sep 2026", acceptedPo: "HL/PO/2026/451", acceptedDate: "09 Sep 2026", items: [{ id: "helix-a-1", item: "AFM probe tips — 10 pack", description: "Consumable AFM probe tips, pack of 10", hsn: "9012", quantity: 6, unit: "Pack", rate: 18500, discount: 0, gst: 18, inStock: true }], terms: DEFAULT_TERMS, deliveryPeriod: "1 week", warranty: "6 months" },
-  { id: "QT-2026-0827-R1", number: "QT-2026-0827", revision: 1, customer: "Tera Research", contact: "Sana Iyer", customerGstin: "33AABCT6281H1ZA", customerState: "Tamil Nadu", billingAddress: "21, OMR Road, Thoraipakkam, Chennai, Tamil Nadu 600097", shippingAddress: "Surface Science Lab, OMR Road, Chennai, Tamil Nadu 600097", paymentTerms: "Net 30", quoteDate: "2026-09-04", validUntil: "2026-09-10", owner: "Priya Shah", subject: "Surface profilometer", status: "Accepted", sentAt: "04 Sep 2026", acceptedPo: "TR/PO/2026/119", acceptedDate: "10 Sep 2026", items: [{ id: "tera-1", item: "Surface Profilometer", description: "Surface profilometer, standard measurement package", hsn: "9027", quantity: 1, unit: "Nos", rate: 1090000, discount: 0, gst: 18, inStock: false }, { id: "tera-2", item: "On-site commissioning", description: "Installation and commissioning", hsn: "9987", quantity: 1, unit: "Job", rate: 130000, discount: 0, gst: 18, inStock: false }], terms: DEFAULT_TERMS, deliveryPeriod: "8 weeks", warranty: "12 months" },
+  { id: "QT-2026-0827-R1", number: "QT-2026-0827", revision: 1, customer: "Tera Research", contact: "Sana Iyer", customerGstin: "33AABCT6281H1ZA", customerState: "Tamil Nadu", billingAddress: "21, OMR Road, Thoraipakkam, Chennai, Tamil Nadu 600097", shippingAddress: "Surface Science Lab, OMR Road, Chennai, Tamil Nadu 600097", paymentTerms: "Net 30", quoteDate: "2026-09-04", validUntil: "2026-09-10", lead: "LD-1045", owner: "Priya Shah", subject: "Surface profilometer", status: "Accepted", sentAt: "04 Sep 2026", acceptedPo: "TR/PO/2026/119", acceptedDate: "10 Sep 2026", items: [{ id: "tera-1", item: "Surface Profilometer", description: "Surface profilometer, standard measurement package", hsn: "9027", quantity: 1, unit: "Nos", rate: 1090000, discount: 0, gst: 18, inStock: false }, { id: "tera-2", item: "On-site commissioning", description: "Installation and commissioning", hsn: "9987", quantity: 1, unit: "Job", rate: 130000, discount: 0, gst: 18, inStock: false }], terms: DEFAULT_TERMS, deliveryPeriod: "8 weeks", warranty: "12 months" },
 ];
 
 // Vendor master and purchase settings. In the real product these come from Settings →

@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import spmLogo from "@/imports/SPM_Logo.png";
-import { APPROVAL_LIMIT, APPROVER, COMPANY, STOCK_LOCATIONS, WAREHOUSE, initialQuotes, money, prettyDate, dateIso, dayDifference, lineValue, numberWords, stamp, stockCatalog, totalsFor, vendorMaster, type Quote } from "./erpMasters";
+import { APPROVAL_LIMIT, APPROVER, COMPANY, STOCK_LOCATIONS, WAREHOUSE, money, prettyDate, dateIso, dayDifference, lineValue, numberWords, stamp, stockCatalog, totalsFor, vendorMaster, type Quote } from "./erpMasters";
 import { applyReceiptToStock, nextEquipmentIds, onOrderFor, orderAfterReceipt, totalOf, updateStore, useErpStore, type Individual, type POActivity, type POLine, type POStatus, type PurchaseOrder, type Quantity, type Receipt } from "./erpStore";
 
 type DisplayStatus = POStatus | "Overdue";
@@ -16,7 +16,7 @@ function statusFor(order: PurchaseOrder): DisplayStatus {
   return isOpen(order) && dayDifference(order.expectedDate) < 0 ? "Overdue" : order.status;
 }
 function statusClass(status: DisplayStatus) { return `po-status po-status--${status.toLowerCase().replace(/ /g, "-")}`; }
-function nextNumber(orders: PurchaseOrder[]) {
+export function nextNumber(orders: PurchaseOrder[]) {
   const highest = Math.max(24095, ...orders.map((order) => Number(order.number.split("-").at(-1)) || 0));
   return `PO-${highest + 1}`;
 }
@@ -38,9 +38,13 @@ function blankOrder(number: string, items: POLine[], linkedQuote = ""): Purchase
     activities: [{ title: linkedQuote ? `Started from quotation ${linkedQuote}` : "Draft created", meta: stamp(), tone: "system" }],
   };
 }
+export function poFromQuote(quote: Quote, number: string): PurchaseOrder {
+  const items = quote.items.filter((line) => !line.inStock).map((line) => ({ id: `line-${line.id}`, item: line.item, description: line.description, hsn: line.hsn, quantity: line.quantity, rate: Math.round(line.rate * 0.72), gst: line.gst, tracked: true, received: 0, serials: [] }));
+  return blankOrder(number, items, `${quote.number} R${quote.revision}`);
+}
 
 export default function PurchaseOrders() {
-  const { orders, quantities, individuals } = useErpStore();
+  const { orders, quantities, individuals, quotes } = useErpStore();
   const setOrders = (change: (all: PurchaseOrder[]) => PurchaseOrder[]) => updateStore((current) => ({ orders: change(current.orders) }));
   const [search, setSearch] = useState(""); const [status, setStatus] = useState("All POs");
   const [editorId, setEditorId] = useState<string | null>(null); const [choosing, setChoosing] = useState(false); const [toast, setToast] = useState("");
@@ -103,17 +107,17 @@ export default function PurchaseOrders() {
       {!filtered.length && <div className="settings-empty"><b>{orders.length ? "No purchase orders match what you typed" : "No purchase orders yet"}</b><p>{orders.length ? "Clear the search box or pick a different status." : "Start with the items that are running low — we will pre-tick them for you."}</p><button className="erp-action" onClick={() => setChoosing(true)}>+ New PO</button></div>}
     </div>
 
-    {choosing && <StartPO close={() => setChoosing(false)} quantities={quantities} orders={orders} create={create} />}
+    {choosing && <StartPO close={() => setChoosing(false)} quantities={quantities} orders={orders} quotes={quotes} create={create} />}
     {toast && <div className="settings-toast" role="status">✓ {toast}</div>}
   </section>;
 }
 
-function StartPO({ close, quantities, orders, create }: { close: () => void; quantities: Quantity[]; orders: PurchaseOrder[]; create: (items: POLine[], linkedQuote?: string) => void }) {
+function StartPO({ close, quantities, orders, quotes, create }: { close: () => void; quantities: Quantity[]; orders: PurchaseOrder[]; quotes: Quote[]; create: (items: POLine[], linkedQuote?: string) => void }) {
   const [step, setStep] = useState<"choose" | "low" | "quote">("choose");
   const low = quantities.filter((item) => totalOf(item) < item.minimum);
   const [ticked, setTicked] = useState<string[]>(low.map((item) => item.id));
   const [amounts, setAmounts] = useState<Record<string, number>>(Object.fromEntries(low.map((item) => [item.id, Math.max(item.minimum * 2 - totalOf(item), item.minimum)])));
-  const accepted = initialQuotes.filter((quote) => quote.status === "Accepted");
+  const accepted = quotes.filter((quote) => quote.status === "Accepted");
 
   const fromLow = () => {
     const items = low.filter((item) => ticked.includes(item.id)).map((item) => {

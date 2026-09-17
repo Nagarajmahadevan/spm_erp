@@ -1,9 +1,9 @@
 import { ATTENDANCE_SETTINGS, JOB_SETTINGS, JOB_SLOTS, prettyDate } from "./erpMasters";
-import { updateStore, useErpStore } from "./erpStore";
+import { resetStore, updateStore, useErpStore } from "./erpStore";
 import DemoConsole from "./DemoConsole";
 import { createContext, useContext, useMemo, useState, type ReactNode } from "react";
 
-type Section = "Company" | "Users & Roles" | "Customers" | "Vendors" | "Equipment Categories" | "Locations" | "Expense Types" | "Alerts" | "Operations" | "Attendance Rules" | "Prototype Tools" | "Tally Export";
+type Section = "Company" | "Users & Roles" | "Customers" | "Vendors" | "Equipment Categories" | "Locations" | "Expense Types" | "Alerts" | "Operations" | "Attendance Rules" | "Manual Check-in/Checkout" | "Tally Export";
 type Row = { name: string; detail: string; status?: "Active" | "Inactive"; values?: Record<string, string> };
 
 const configs: Record<Section, { description: string; rows: Row[]; importable?: boolean }> = {
@@ -17,7 +17,7 @@ const configs: Record<Section, { description: string; rows: Row[]; importable?: 
   "Alerts": { description: "Control lead times, recipients and delivery channels.", rows: [] },
   "Operations": { description: "Job scheduling limits and calibration defaults.", rows: [] },
   "Attendance Rules": { description: "Working hours, weekly off and holidays used by Attendance and the Jobs schedule.", rows: [] },
-  "Prototype Tools": { description: "Simulate mobile check-in/out and office biometric events for this demo. Not a real integration.", rows: [] },
+  "Manual Check-in/Checkout": { description: "Manually log a site or office check-in/checkout for an engineer, and reset the sample data.", rows: [] },
   "Tally Export": { description: "Map ERP records to Tally ledgers and export settings.", rows: [] },
 };
 
@@ -33,7 +33,7 @@ export default function Settings() {
   const [toast, setToast] = useState("");
   const [userTab, setUserTab] = useState<"Users" | "Roles">("Users");
   const config = configs[section];
-  const isFormPage = section === "Company" || section === "Alerts" || section === "Operations" || section === "Attendance Rules" || section === "Prototype Tools" || section === "Tally Export";
+  const isFormPage = section === "Company" || section === "Alerts" || section === "Operations" || section === "Attendance Rules" || section === "Manual Check-in/Checkout" || section === "Tally Export";
   const rows = useMemo(() => config.rows.filter((row) => row.name.toLowerCase().includes(query.toLowerCase()) && (filter === "All" || row.status === filter)), [config, query, filter]);
   const notify = (message: string) => { setToast(message); window.setTimeout(() => setToast(""), 2800); };
   const listMode = !isFormPage && !(section === "Users & Roles" && userTab === "Roles");
@@ -47,7 +47,7 @@ export default function Settings() {
       <div className="settings-workspace">
         <div className="settings-workspace-head"><div><h2>{section}</h2><p>{config.description}</p></div>{listMode && <button className="erp-action" onClick={() => setDrawer("new")}>+ Add {section === "Users & Roles" ? "user" : section.slice(0, -1)}</button>}</div>
         {section === "Users & Roles" && <div className="settings-tabs"><button className={userTab === "Users" ? "is-active" : ""} onClick={() => setUserTab("Users")}>Users</button><button className={userTab === "Roles" ? "is-active" : ""} onClick={() => setUserTab("Roles")}>Roles</button></div>}
-        {section === "Company" ? <CompanyForm onSave={() => notify("Company settings saved")} /> : section === "Alerts" ? <AlertsForm onSave={() => notify("Alert preferences saved")} /> : section === "Operations" ? <OperationsForm onSave={() => notify("Operations settings saved")} /> : section === "Attendance Rules" ? <AttendanceRulesForm onSave={() => notify("Attendance rules saved")} /> : section === "Prototype Tools" ? <PrototypeToolsSection /> : section === "Tally Export" ? <TallyForm onSave={() => notify("Tally export settings saved")} /> : section === "Users & Roles" && userTab === "Roles" ? <RolePermissions onSave={() => notify("Role permissions saved")} /> : <>
+        {section === "Company" ? <CompanyForm onSave={() => notify("Company settings saved")} /> : section === "Alerts" ? <AlertsForm onSave={() => notify("Alert preferences saved")} /> : section === "Operations" ? <OperationsForm onSave={() => notify("Operations settings saved")} /> : section === "Attendance Rules" ? <AttendanceRulesForm onSave={() => notify("Attendance rules saved")} /> : section === "Manual Check-in/Checkout" ? <ManualCheckInSection /> : section === "Tally Export" ? <TallyForm onSave={() => notify("Tally export settings saved")} /> : section === "Users & Roles" && userTab === "Roles" ? <RolePermissions onSave={() => notify("Role permissions saved")} /> : <>
           <div className="settings-toolbar"><div className="settings-list-search"><span>⌕</span><input aria-label={`Search ${title}`} value={query} onChange={(e) => setQuery(e.target.value)} placeholder={`Search ${title.toLowerCase()}…`} /></div><span className="settings-count">{rows.length} records</span><select aria-label="Record status filter" value={filter} onChange={(e) => setFilter(e.target.value)}><option>Active</option><option>Inactive</option><option>All</option></select>{config.importable && <><button className="settings-link" onClick={() => notify("CSV template downloaded")}>Download template</button><button className="settings-link" onClick={() => notify("Choose a CSV file to import")}>Import CSV</button></>}</div>
           <div className="settings-list">{rows.map((row) => <button key={row.name} onClick={() => setDrawer(row)} className="settings-row"><span className="settings-row-avatar">{row.name.slice(0, 1)}</span><span><b>{row.name}</b><small>{row.detail}</small></span><em className={row.status === "Inactive" ? "is-inactive" : ""}>{row.status}</em><span className="settings-row-arrow">›</span></button>)}</div>
         </>}
@@ -110,11 +110,21 @@ function OperationsForm({ onSave }: { onSave: () => void }) {
   </form>;
 }
 
-function PrototypeToolsSection() {
+function ManualCheckInSection() {
   const store = useErpStore();
+  const resetDemoData = () => {
+    if (!window.confirm("Reset all data back to the starting sample? This can't be undone.")) return;
+    resetStore();
+    window.location.reload();
+  };
   return <div className="settings-form">
-    <p className="erp-muted">This stands in for the mobile app and office biometric device, neither of which exist yet. It is kept out of ordinary work screens on purpose — use it here to generate sample check-in/checkout activity for demos and testing.</p>
+    <p className="erp-muted">Use this to record a check-in or checkout by hand until the mobile app and biometric device are connected.</p>
     <DemoConsole jobs={store.jobs} />
+    <section className="settings-subsection">
+      <h3>Reset demo data</h3>
+      <p className="erp-muted">Clears everything you've entered and starts over from the original sample data.</p>
+      <button type="button" className="settings-outline" onClick={resetDemoData}>Reset demo data</button>
+    </section>
   </div>;
 }
 
@@ -134,8 +144,8 @@ function AttendanceRulesForm({ onSave }: { onSave: () => void }) {
       <label className="settings-field"><span>Working hours start</span><input type="time" defaultValue={ATTENDANCE_SETTINGS.workStart} /></label>
       <label className="settings-field"><span>Working hours end</span><input type="time" defaultValue={ATTENDANCE_SETTINGS.workEnd} /></label>
       <label className="settings-field"><span>Weekly off</span><select defaultValue={String(ATTENDANCE_SETTINGS.weeklyOff[0])}>{WEEKDAYS.map((day, index) => <option key={day} value={index}>{day}</option>)}</select><small>Used to compute schedule capacity.</small></label>
-      <label className="settings-field"><span>Late grace period (minutes)</span><input type="number" min="0" defaultValue={ATTENDANCE_SETTINGS.lateGraceMinutesDemo} /><small>Demo default — not yet confirmed by SPM. A visit is only flagged "Check-in Not Received" after this grace window.</small></label>
-      <label className="settings-field"><span>Site check-in radius (metres)</span><input type="number" min="10" defaultValue={ATTENDANCE_SETTINGS.siteRadiusMetersDemo} /><small>Demo default — not yet confirmed by SPM.</small></label>
+      <label className="settings-field"><span>Late grace period (minutes)</span><input type="number" min="0" defaultValue={ATTENDANCE_SETTINGS.lateGraceMinutesDemo} /><small>A visit is only flagged "Check-in Not Received" after this grace window.</small></label>
+      <label className="settings-field"><span>Site check-in radius (metres)</span><input type="number" min="10" defaultValue={ATTENDANCE_SETTINGS.siteRadiusMetersDemo} /><small>How far from the site a check-in can be and still count as on-site.</small></label>
     </div>
     <button className="erp-action" type="submit">Save attendance rules</button>
 

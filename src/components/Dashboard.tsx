@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { useNavigate } from "react-router";
 import spmLogo from "@/imports/SPM_Logo.png";
 import Settings from "./Settings";
 import Stock from "./Stock";
@@ -63,6 +64,7 @@ const modules = [
 const engineerModules = new Set(["Dashboard", "Attendance", "Advance & Expense", "Stock", "Jobs", "Due Dates"]);
 
 export default function Dashboard() {
+  const navigate = useNavigate();
   const [collapsed, setCollapsed] = useState(false);
   const [role] = useState<Role>("Admin");
   const [active, setActive] = useState("Dashboard");
@@ -100,7 +102,7 @@ export default function Dashboard() {
         <div className="erp-sidebar-user">
           <span className="erp-avatar">AK</span>
           {!collapsed && <span><b>Arun Kumar</b><small>{role}</small></span>}
-          <button onClick={() => window.location.assign("/login")} title="Sign out" aria-label="Sign out" className="erp-sidebar-signout"><Icon name="arrow" size={15} /></button>
+          <button onClick={() => navigate("/login")} title="Sign out" aria-label="Sign out" className="erp-sidebar-signout"><Icon name="arrow" size={15} /></button>
         </div>
       </div>
     </aside>
@@ -115,7 +117,7 @@ export default function Dashboard() {
       </header>
       <main className="erp-content">
         {active === "Settings" ? <Settings /> : active === "Stock" ? <Stock isEngineer={role === "Engineer"} focusItem={stockFocus} /> : active === "Leads" ? <Leads /> : active === "Quotations" ? <Quotations /> : active === "Invoices" ? <Invoices focusInvoice={invoiceFocus} /> : active === "Purchase Orders" ? <PurchaseOrders /> : active === "Due Dates" ? <DueDates isEngineer={role === "Engineer"} /> : active === "Customer Instruments" ? <CustomerInstruments openJob={goToJob} /> : active === "Jobs" ? <Jobs isEngineer={role === "Engineer"} focusJob={jobFocus} /> : active === "Attendance" ? <Attendance /> : active === "Advance & Expense" ? <AdvanceExpense focusEngineer={engineerFocus} /> : active === "Accounts" ? <Accounts openInvoice={goToInvoice} /> : active === "Reports" ? <Reports openInvoice={goToInvoice} openJob={goToJob} openStockItem={goToStockItem} openEngineer={goToEngineer} /> : <>
-        <div className="mb-8 flex flex-wrap items-end justify-between gap-4"><div><p className="erp-secondary-text">Tuesday, 15 September</p><h1>Good morning, Arun</h1><p className="erp-secondary-text mt-1">Here’s a quick view of what needs your attention.</p></div><button className="erp-action">Create quotation <Icon name="arrow" size={16} /></button></div>
+        <div className="mb-8 flex flex-wrap items-end justify-between gap-4"><div><p className="erp-secondary-text">{new Intl.DateTimeFormat("en-IN", { weekday: "long", day: "numeric", month: "long" }).format(new Date())}</p><h1>Good morning, Arun</h1><p className="erp-secondary-text mt-1">Here’s a quick view of what needs your attention.</p></div><button className="erp-action">Create quotation <Icon name="arrow" size={16} /></button></div>
         <section className="erp-stats" aria-label="Business summary">
           {[ ["Open quotations", "12", "₹ 6.40 L", "quote", "sales", "↑ 18% vs last week"], ["Pending invoices", "08", "₹ 8.20 L", "invoice", "money", "↑ 6% vs last week"], ["Stock alerts", "04", "Items to review", "stock", "stock", "↑ 2 new alerts"], ["Due this week", "03", "Follow up today", "due", "overdue", "↓ 1 from last week"] ].map(([label, value, detail, icon, tone, trend]) => <article key={label} className="erp-stat"><span className={`erp-stat-icon erp-stat-icon--${tone}`}><Icon name={icon as IconName} /></span><div className="erp-stat-label"><p>{label}</p><small>{detail}</small></div><strong>{value}</strong><em className={`erp-trend erp-trend--${tone}`}>{trend}</em></article>)}
         </section>
