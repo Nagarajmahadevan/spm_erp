@@ -1,0 +1,97 @@
+.ci-page { min-width: 0; }
+.ci-summary { margin-bottom: 18px; }
+.ci-summary button { display: flex; align-items: center; gap: 14px; }
+.ci-summary b { font-size: 19px; font-variant-numeric: tabular-nums; }
+.ci-register-filters { display: grid; grid-template-columns: minmax(190px, 1.4fr) minmax(150px, 1.1fr) minmax(130px, .85fr) minmax(130px, .85fr) auto; align-items: end; }
+.ci-register-filters > label, .ci-more-filters > label { min-width: 0; }
+.ci-register-filters input, .ci-register-filters select, .ci-more-filters select { width: 100%; min-width: 0; }
+.ci-register-filters > button { white-space: nowrap; height: 38px; }
+.ci-more-filters { display: flex; gap: 12px; margin-bottom: 12px; }
+.ci-more-filters > label { width: 220px; }
+.ci-results { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; margin: 12px 0; font-size: 13px; }
+.ci-results > div { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; flex: 1; min-width: 0; }
+.ci-results > div > span { color: #627384; }
+.ci-results > label { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+.ci-results select { border: 1px solid #dce5ea; border-radius: 6px; background: white; height: 34px; max-width: 170px; padding: 0 8px; }
+.ci-register { table-layout: fixed; min-width: 0; width: 100%; }
+.ci-register .ci-selection-cell { width: 44px; min-width: 44px; max-width: 44px; text-align: center; padding: 10px 12px; }
+.ci-selection-cell input { display: block; width: 16px; height: 16px; margin: auto; accent-color: #1687ad; }
+.ci-register td, .ci-register th { overflow-wrap: anywhere; }
+.ci-register tbody tr { cursor: default; }
+.ci-register .erp-record-link { text-align: left; font-weight: 600; line-height: 1.35; }
+.ci-register tbody tr.is-selected > td { background: #e6f4fb; box-shadow: inset 0 -1px #c5e3ef; }
+.ci-register tbody tr.is-selected:hover > td { background: #dceff8; }
+.ci-register tr.is-ended td { color: #7d8995; }
+.ci-register-serial { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+.ci-date, .ci-due-note { white-space: nowrap; }
+.ci-register small.ci-due-note, .ci-due-note { font-size: 12px; }
+.ci-register small.ci-due-note--late, .ci-due-note--late { color: #a1424c; }
+.ci-register small.ci-due-note--soon, .ci-due-note--soon { color: #95681d; }
+.ci-conflict-note { font-size: 13px; }
+.ci-cluster-bar { font-size: 13px; align-items: center; }
+.ci-cluster-bar > span { flex: 1; min-width: 220px; }
+.ci-cluster-bar button { font-size: 13px; }
+.ci-record-drawer.stock-detail { display: flex; flex-direction: column; width: min(580px, 100vw); overflow: hidden; padding: 0; }
+.ci-drawer-heading { margin: 0; padding: 22px 24px 14px; flex: none; }
+.ci-drawer-heading h2 { overflow-wrap: anywhere; }
+.ci-drawer-heading p { font-size: 13px; color: #627384; margin-top: 4px; }
+.ci-drawer-actions { display: flex; align-items: center; gap: 10px; padding: 0 24px 16px; border-bottom: 1px solid #e2e8ed; flex: none; }
+.ci-drawer-body { overflow-y: auto; min-height: 0; padding: 0 24px 24px; overscroll-behavior: contain; }
+.ci-drawer-body .stock-detail-section { margin-top: 22px; }
+.ci-drawer-body .stock-detail-section h3 { font-size: 14px; margin-bottom: 12px; }
+.ci-drawer-body .invoice-facts { margin-bottom: 0; padding: 0; }
+.ci-drawer-body .invoice-facts dt { font-size: 12px; text-transform: none; letter-spacing: 0; }
+.ci-drawer-body .invoice-facts dd { font-size: 14px; overflow-wrap: anywhere; }
+.ci-drawer-body .invoice-facts dd small { display: block; color: #6e7b89; font-size: 12px; margin-top: 4px; }
+.ci-drawer-body .stock-timeline b { font-size: 14px; }
+.ci-drawer-body .stock-timeline span, .ci-drawer-body .stock-timeline small { font-size: 12px; }
+.ci-drawer-body .stock-timeline-empty { font-size: 13px; }
+.ci-drawer-body .ci-drawer-contact { gap: 12px; }
+.ci-drawer-body .ci-drawer-contact a { font-size: 13px; padding: 5px 9px; }
+.ci-drawer-body .ci-open-job { font-size: 14px; margin: 16px 0 0; padding: 11px 12px; }
+.ci-drawer-body .ci-open-job span { font-size: 12px; }
+.ci-scroll-modal.stock-move-modal { display: flex; flex-direction: column; width: min(730px, 100%); padding: 0; max-height: calc(100dvh - 48px); overflow: hidden; }
+.ci-modal-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; padding: 20px 24px 16px; border-bottom: 1px solid #e2e8ed; flex: none; }
+.ci-modal-heading h2 { margin: 0; }
+.ci-modal-heading p { margin-top: 4px; color: #6e7b89; font-size: 13px; }
+.ci-modal-heading > button { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 6px; color: #607083; font-size: 24px; flex: none; }
+.ci-modal-heading > button:hover { background: #eef4f7; }
+.ci-modal-body { min-height: 0; overflow-y: auto; padding: 20px 24px; overscroll-behavior: contain; }
+.ci-scroll-modal .ci-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.ci-scroll-modal .quote-grid-wide { grid-column: 1 / -1; }
+.ci-scroll-modal label { min-width: 0; }
+.ci-scroll-modal label > span { display: block; margin-bottom: 6px; color: #465869; font-size: 13px; font-weight: 600; }
+.ci-scroll-modal label > input:not([type="checkbox"]), .ci-scroll-modal label > select, .ci-scroll-modal label > textarea { display: block; width: 100%; min-width: 0; min-height: 38px; border: 1px solid #d7e1e7; border-radius: 6px; background: #fff; padding: 8px 10px; color: #364958; font-size: 14px; }
+.ci-scroll-modal label > textarea { min-height: 80px; }
+.ci-scroll-modal label > input[type="file"] { white-space: normal; }
+.ci-scroll-modal label > input:focus, .ci-scroll-modal label > select:focus, .ci-scroll-modal label > textarea:focus { outline: 2px solid #87c8df; outline-offset: 1px; }
+.ci-scroll-modal label small, .ci-form-helper { display: block; font-size: 12px; color: #657586; line-height: 1.5; margin-top: 6px; }
+.ci-form-helper { margin: 0 0 14px; }
+.ci-scroll-modal .ci-form-section { margin-bottom: 24px; }
+.ci-scroll-modal .ci-form-section h3 { font-size: 14px; margin-bottom: 14px; }
+.ci-mode-field { display: block; margin-bottom: 16px; }
+.ci-due-preview { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; padding: 12px 0; font-size: 14px; }
+.ci-due-preview p { min-width: 0; }
+.ci-due-preview small { display: block; font-size: 12px; color: #6e7b89; margin-top: 4px; }
+.ci-due-preview button { white-space: nowrap; font-size: 13px; }
+.ci-reset-due { text-align: left; align-self: center; }
+.ci-scroll-modal .ci-additional { margin: 0 0 14px; }
+.ci-scroll-modal .ci-additional summary { gap: 6px; }
+.ci-scroll-modal .ci-additional summary b { font-size: 14px; }
+.ci-scroll-modal .ci-additional summary span { font-size: 12px; }
+.ci-modal-footer { border-top: 1px solid #e2e8ed; background: #fff; padding: 16px 24px; flex: none; }
+.ci-modal-footer > div { display: flex; align-items: center; justify-content: flex-end; gap: 10px; }
+.ci-modal-footer .stock-count-error { font-size: 13px; line-height: 1.4; margin: 0 0 10px; }
+.ci-import-preview { margin-top: 12px; }
+.ci-import-preview td { overflow-wrap: anywhere; }
+@media (max-width: 1100px) {
+  .ci-register-filters { grid-template-columns: minmax(150px, 1.3fr) minmax(130px, 1fr) minmax(120px, .8fr) minmax(110px, .8fr) auto; gap: 8px; }
+  .ci-register-filters > button { padding: 0 8px; }
+}
+@media (max-width: 760px) {
+  .ci-register-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ci-register-filters > label:first-child { grid-column: 1 / -1; }
+  .ci-scroll-modal .ci-form-grid { grid-template-columns: minmax(0, 1fr); }
+  .ci-register { min-width: 740px; }
+  .ci-scroll-modal.stock-move-modal { max-height: calc(100dvh - 24px); }
+}

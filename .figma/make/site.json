@@ -1,0 +1,10 @@
+{
+  "description": "Streamlines enterprise resource planning by managing business processes efficiently and resolving system errors to enhance operational productivity.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}
