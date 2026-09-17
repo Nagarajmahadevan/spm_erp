@@ -1,12 +1,12 @@
 import { useMemo, useState } from "react";
 import { ALERT_SETTINGS, APPROVER, CAL_LAB, ENGINEER, WAREHOUSE, dateIso, dayDifference, money, prettyDate, stamp } from "./erpMasters";
 import { COMPANY, JOB_SETTINGS, siteById, totalsFor, vendorMaster } from "./erpMasters";
-import { balanceOf, invoiceTotals, nextDueFor, openJobFor, paidSoFar, statutoryDues, updateStore, useErpStore, type Job, type Payment, type PaymentRecord, type StockMove } from "./erpStore";
+import { balanceOf, invoiceTotals, nextDueFor, openJobFor, paidSoFar, recordCustomerReceipt, statutoryDues, updateStore, useErpStore, type Job, type PaymentMode, type PaymentRecord, type StockMove } from "./erpStore";
 import { Overlay, Pagination, useTablePage } from "./ErpUi";
 
-type DueType = "Service" | "Master" | "Fleet" | "Payment" | "VendorBill" | "Bill" | "Statutory";
+export type DueType = "Service" | "Master" | "Fleet" | "Payment" | "VendorBill" | "Bill" | "Statutory";
 type DueTab = "service" | "equipment" | "money";
-type DueItem = {
+export type DueItem = {
   id: string;
   type: DueType;
   title: string;
@@ -44,7 +44,7 @@ const GROUPS: Record<DueTab, { key: string; title: string; blurb: string; money?
   ],
 };
 
-function whenLabel(date: string) {
+export function whenLabel(date: string) {
   const diff = dayDifference(date);
   if (diff < 0) return { text: `Overdue · ${Math.abs(diff)}d`, tone: "late" as const };
   if (diff === 0) return { text: "Due today", tone: "late" as const };
@@ -53,7 +53,7 @@ function whenLabel(date: string) {
   return { text: `Due ${prettyDate(date)}`, tone: "later" as const };
 }
 
-function buildDueItems(store: ReturnType<typeof useErpStore>): DueItem[] {
+export function buildDueItems(store: ReturnType<typeof useErpStore>): DueItem[] {
   const items: DueItem[] = [];
 
   store.instruments.filter((instrument) => instrument.status === "Active").forEach((instrument) => {
@@ -84,10 +84,10 @@ function buildDueItems(store: ReturnType<typeof useErpStore>): DueItem[] {
     lead: ALERT_SETTINGS.leadDays.Rental, recordKind: "equipment", recordId: unit.id,
   }));
 
-  store.invoices.filter((invoice) => (invoice.status === "Sent" || invoice.status === "Partly paid") && balanceOf(invoice) > 0).forEach((invoice) => items.push({
+  store.invoices.filter((invoice) => invoice.status === "Sent" && balanceOf(invoice, store.customerReceipts, store.customerTds) > 0).forEach((invoice) => items.push({
     id: `pay-${invoice.id}`, type: "Payment", title: `${invoice.number} — ${invoice.customer}`,
     party: invoice.customer, date: invoice.dueDate, amount: invoiceTotals(invoice).grandTotal,
-    received: paidSoFar(invoice), balance: balanceOf(invoice), lastReminder: invoice.lastReminder,
+    received: paidSoFar(invoice, store.customerReceipts), balance: balanceOf(invoice, store.customerReceipts, store.customerTds), lastReminder: invoice.lastReminder,
     owner: APPROVER, lead: ALERT_SETTINGS.leadDays.Payment, recordKind: "invoice", recordId: invoice.id,
   }));
 
@@ -345,7 +345,7 @@ function ActionSheet({ item, store, close, flash }: { item: DueItem; store: Retu
 
   const [date, setDate] = useState(today);
   const [amount, setAmount] = useState(String(item.balance ?? item.amount ?? 0));
-  const [mode, setMode] = useState<Payment["mode"]>("Bank");
+  const [mode, setMode] = useState<PaymentMode>("Bank");
   const [reference, setReference] = useState("");
   const [extend, setExtend] = useState(false);
   const [lab, setLab] = useState(store.masters.find((entry) => entry.id === item.recordId)?.lab ?? vendorMaster[0].name);
@@ -378,16 +378,12 @@ function ActionSheet({ item, store, close, flash }: { item: DueItem; store: Retu
   };
   const recordPayment = () => {
     const value = Number(amount) || 0;
-    if (value <= 0) return;
-    updateStore((current) => ({
-      invoices: current.invoices.map((row) => {
-        if (row.id !== invoice!.id) return row;
-        const payments = [{ id: `pay-${Date.now()}`, date, amount: value, mode, reference, tds: 0 }, ...row.payments];
-        const settled = invoiceTotals(row).grandTotal - payments.reduce((total, entry) => total + entry.amount + entry.tds, 0) <= 0;
-        return { ...row, payments, status: settled ? "Paid" as const : "Partly paid" as const, activities: [{ title: `${settled ? "Payment received in full" : "Part payment received"} ${money(value)}`, meta: stamp(), tone: "paid" as const }, ...row.activities] };
-      }),
-    }));
-    close(); flash(`${money(value)} recorded against ${invoice!.number}.`);
+    if (value <= 0 || !invoice) return;
+    const receipt = { id: `RCP-${Date.now()}`, customer: invoice.customer, date, amount: value, mode, reference: reference.trim() || undefined, clearance: (mode === "Cheque" ? "Pending Clearance" : "Cleared") as "Pending Clearance" | "Cleared", allocations: [{ invoiceId: invoice.id, amount: value }], recordedBy: item.owner, recordedAt: stamp(), status: "Posted" as const };
+    updateStore((current) => recordCustomerReceipt(current, receipt));
+    close();
+    const remaining = balanceOf(invoice, [...store.customerReceipts, receipt], store.customerTds);
+    flash(`${money(value)} recorded against ${invoice.number}.${remaining > 0.005 ? ` ${money(remaining)} still due.` : " Nothing more is due."}${mode === "Cheque" ? " Pending clearance — won't count until it clears." : ""}`);
   };
   const markBillPaid = () => {
     updateStore((current) => ({ bills: current.bills.map((row) => row.id === bill!.id ? { ...row, dueDate: addMonths(row.dueDate, 1) } : row) }));
@@ -507,7 +503,7 @@ function ActionSheet({ item, store, close, flash }: { item: DueItem; store: Retu
       <div className="po-receive-grid">
         <label><span>Date received</span><input type="date" value={date} onChange={(event) => setDate(event.target.value)} /></label>
         <label><span>Amount received</span><input type="number" min="0" value={amount} onChange={(event) => setAmount(event.target.value)} /></label>
-        <label><span>How was it paid?</span><select value={mode} onChange={(event) => setMode(event.target.value as Payment["mode"])}><option>Bank</option><option>UPI</option><option>Cheque</option><option>Cash</option></select></label>
+        <label><span>How was it paid?</span><select value={mode} onChange={(event) => setMode(event.target.value as PaymentMode)}><option>Bank</option><option>UPI</option><option>Cheque</option><option>Cash</option></select></label>
         <label><span>Reference number</span><input value={reference} onChange={(event) => setReference(event.target.value)} placeholder="UTR, cheque or UPI number" /></label>
       </div>
       <div className="invoice-payment-footer"><span>Recording {money(Number(amount) || 0)}</span><div><button className="settings-outline" onClick={close}>Cancel</button><button className="erp-action" disabled={(Number(amount) || 0) <= 0} onClick={recordPayment}>Save payment</button></div></div>
@@ -518,7 +514,7 @@ function ActionSheet({ item, store, close, flash }: { item: DueItem; store: Retu
       <div className="po-receive-grid">
         <label><span>Amount paid</span><input type="number" min="0" value={amount} onChange={(event) => setAmount(event.target.value)} /></label>
         <label><span>Paid on</span><input type="date" value={date} onChange={(event) => setDate(event.target.value)} /></label>
-        <label><span>How did you pay?</span><select value={mode} onChange={(event) => setMode(event.target.value as Payment["mode"])}><option>Bank</option><option>UPI</option><option>Cheque</option><option>Cash</option></select></label>
+        <label><span>How did you pay?</span><select value={mode} onChange={(event) => setMode(event.target.value as PaymentMode)}><option>Bank</option><option>UPI</option><option>Cheque</option><option>Cash</option></select></label>
         <label><span>Reference number</span><input value={reference} onChange={(event) => setReference(event.target.value)} placeholder="UTR, cheque or challan number" /></label>
       </div>
       <div className="invoice-payment-footer"><span>Goes to Accounts and the Tally export</span><div><button className="settings-outline" onClick={close}>Cancel</button><button className="erp-action" disabled={(Number(amount) || 0) <= 0} onClick={markPaid}>Save payment</button></div></div>
@@ -573,7 +569,7 @@ function RecordDrawer({ item, store, close }: { item: DueItem; store: ReturnType
         <div><dt>Invoice date</dt><dd>{prettyDate(invoice.invoiceDate)}</dd></div>
         <div><dt>Payment due by</dt><dd>{prettyDate(invoice.dueDate)}</dd></div>
         <div><dt>Invoice value</dt><dd>{money(invoiceTotals(invoice).grandTotal)}</dd></div>
-        <div><dt>Money still due</dt><dd>{money(balanceOf(invoice))}</dd></div>
+        <div><dt>Money still due</dt><dd>{money(balanceOf(invoice, store.customerReceipts, store.customerTds))}</dd></div>
       </dl>
       <section className="stock-detail-section"><h3>What has happened</h3><div className="lead-timeline quote-activity">{invoice.activities.map((activity, index) => <div key={index}><i /><p><b>{activity.title}</b><span>{activity.meta}</span></p></div>)}</div></section>
     </>}

@@ -26,7 +26,7 @@ function billSummary(expense: Pick<Expense, "billFiles" | "billMissingReason">) 
   return "—";
 }
 
-export default function AdvanceExpense() {
+export default function AdvanceExpense({ focusEngineer }: { focusEngineer?: string } = {}) {
   const store = useErpStore();
   const [tab, setTab] = useState<Tab>("Overview");
   const [toast, setToast] = useState("");
@@ -38,7 +38,7 @@ export default function AdvanceExpense() {
       <div className="leads-actions">{tab === "Expenses" && <button className="erp-action" onClick={() => setAdding(true)}>+ Add Expense</button>}<button className="settings-outline" onClick={() => setPayFor("")}>Record Payment</button></div>
     </div>
     <div className="stock-tabs job-tabs">{(["Overview", "Expenses", "Payments"] as Tab[]).map((entry) => <button key={entry} className={tab === entry ? "is-active" : ""} onClick={() => setTab(entry)}>{entry}</button>)}</div>
-    {tab === "Overview" && <OverviewView store={store} openPay={setPayFor} />}
+    {tab === "Overview" && <OverviewView store={store} openPay={setPayFor} initialEngineer={focusEngineer} />}
     {tab === "Expenses" && <ExpensesView store={store} flash={flash} />}
     {tab === "Payments" && <PaymentsView store={store} flash={flash} />}
     {adding && <NewExpenseForm store={store} close={() => setAdding(false)} flash={flash} />}
@@ -48,11 +48,11 @@ export default function AdvanceExpense() {
 }
 
 /* ─── Overview ────────────────────────────────────────────────────── */
-function OverviewView({ store, openPay }: { store: Store; openPay: (engineer: string) => void }) {
+function OverviewView({ store, openPay, initialEngineer }: { store: Store; openPay: (engineer: string) => void; initialEngineer?: string }) {
   const [query, setQuery] = useState("");
   const [balanceFilter, setBalanceFilter] = useState("All");
   const [sort, setSort] = useState("attention");
-  const [openEngineer, setOpenEngineer] = useState<string | null>(null);
+  const [openEngineer, setOpenEngineer] = useState<string | null>(initialEngineer ?? null);
   const allRows = engineers.map((engineer) => ({ engineer: engineer.name, ...engineerBalance(store.expenses, store.advancePayments, engineer.name) }));
   const bucket = (row: (typeof allRows)[number]) => { const status = balanceStatus(row.balance, row.pendingClaims); return status === "With engineer" ? "With Engineer" : status === "To reimburse" ? "To Reimburse" : "Settled"; };
   const rows = allRows.filter((row) => row.engineer.toLowerCase().includes(query.toLowerCase()) && (balanceFilter === "All" || bucket(row) === balanceFilter))

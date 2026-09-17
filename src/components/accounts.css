@@ -1,0 +1,49 @@
+/* Accounts — Customer Outstanding, Bills & Expenses, Receipts & Payments. */
+.accounts-page .stock-tabs { margin-bottom: 14px; }
+.accounts-filters { margin-bottom: 10px; }
+.accounts-filters .erp-search-filter { flex: 1.6; }
+
+/* Two compact figures, deliberately not styled as cards — see Accounts §2. */
+.accounts-mini-stats { display: flex; flex-wrap: wrap; gap: 22px; margin: 4px 0 16px; }
+.accounts-mini-stats span { color: #7b8894; font-size: 12px; font-weight: 600; }
+.accounts-mini-stats b { margin-left: 6px; color: #2c4459; font-size: 15px; font-variant-numeric: tabular-nums; }
+
+.accounts-figure--overdue { color: #ad4f5d; }
+.accounts-figure--advance { color: #2e7d4c; }
+.accounts-advance-chip, .accounts-pending-chip { display: block; margin-top: 3px; font-size: 10px; font-weight: 700; }
+.accounts-advance-chip { color: #2e7d4c; }
+.accounts-pending-chip { color: #a0701f; }
+
+.accounts-category-pill { display: inline-flex; border-radius: 99px; background: #eef3f5; padding: 3px 9px; color: #5c6c7c; font-size: 10px; font-weight: 700; white-space: nowrap; }
+
+.invoice-status--unpaid { background: #eaf8fd; color: #177fa7; }
+
+.settings-drawer.accounts-drawer { width: min(720px, 100vw); }
+.accounts-drawer-actions { padding: 0 22px; margin-top: -6px; }
+.accounts-drawer-body { flex: 1; overflow-y: auto; padding: 4px 22px 22px; }
+.accounts-advance-note, .accounts-pending-note { margin: 0 0 6px; color: #47606f; font-size: 12px; line-height: 1.5; }
+.accounts-tds-pending { display: block; margin-top: 2px; color: #a0701f; font-size: 10px; font-weight: 700; }
+.accounts-tds-entry + .accounts-tds-entry { margin-top: 4px; border-top: 1px solid #edf1f3; padding-top: 16px; }
+.accounts-tds-status { display: inline-flex; border-radius: 99px; padding: 3px 9px; font-size: 10px; font-weight: 700; }
+.accounts-tds-status--pending { background: #fdf4e8; color: #a0701f; }
+.accounts-tds-status--verified { background: #eaf7ee; color: #2e7d4c; }
+.accounts-tds-status--reversed { background: #f0f2f4; color: #77848f; }
+
+.accounts-form-modal { width: min(720px, 100%); max-height: calc(100vh - 48px); }
+.accounts-clearance-choice { margin: 4px 0 14px; }
+.accounts-tds-toggle { margin: 4px 0 12px; }
+.accounts-allocation-table input { box-sizing: border-box; width: 100%; min-height: 34px; border: 1px solid #d8e3e8; border-radius: 6px; padding: 0 8px; color: #425767; font: inherit; font-size: 12px; text-align: right; }
+.accounts-tds-reference { margin-top: 12px; }
+.accounts-receipt-preview { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+
+.accounts-txn-in { color: #2e7d4c; font-weight: 700; }
+.accounts-txn-out { color: #ad4f5d; font-weight: 700; }
+.accounts-txn-linked-note { display: block; margin-top: 2px; color: #8a98a3; font-size: 10px; font-weight: 700; }
+
+.accounts-clone-hint { margin: 0 0 12px; color: #47606f; font-size: 12px; line-height: 1.5; }
+
+@media (max-width: 900px) {
+  .settings-drawer.accounts-drawer { width: 100vw; }
+  .accounts-form-modal { width: 100vw; max-height: 100vh; border-radius: 0; }
+  .accounts-receipt-preview { grid-template-columns: 1fr; }
+}

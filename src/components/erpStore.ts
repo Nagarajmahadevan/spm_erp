@@ -124,11 +124,14 @@ export function receiveAgainstOrder(current: Store, orderId: string, receipt: Re
 }
 
 // Invoices. Due Dates reads the unpaid ones, so they live here rather than in the module.
-export type InvoiceStatus = "Draft" | "Sent" | "Partly paid" | "Paid" | "Cancelled";
+// Document Status (Draft/Sent/Cancelled) and Payment Status (Unpaid/Partly Paid/Paid) are
+// deliberately separate axes — see Accounts §7. "Sent" is displayed as "Issued" wherever the
+// two could be confused; the enum value is kept as "Sent" to avoid touching every comparison.
+export type InvoiceStatus = "Draft" | "Sent" | "Cancelled";
+export type InvoicePaymentStatus = "Unpaid" | "Partly Paid" | "Paid";
 export type InvoiceDisplayStatus = InvoiceStatus | "Overdue";
 export type PaymentMode = "Bank" | "UPI" | "Cheque" | "Cash";
 export type InvoiceLine = { id: string; item: string; description: string; hsn: string; quantity: number; rate: number; gst: number; stockCode?: string };
-export type Payment = { id: string; date: string; amount: number; mode: PaymentMode; reference: string; tds: number };
 export type InvoiceActivity = { title: string; meta: string; tone?: "sent" | "paid" | "system" };
 export type Invoice = {
   id: string;
@@ -154,28 +157,112 @@ export type Invoice = {
   freightCharges: number;
   overallDiscount: number;
   items: InvoiceLine[];
-  payments: Payment[];
   fromQuote?: string;
   sentAt?: string;
   lastReminder?: string;
   activities: InvoiceActivity[];
 };
 
-export function paidSoFar(invoice: Invoice) { return invoice.payments.reduce((total, payment) => total + payment.amount + payment.tds, 0); }
+// ─── Accounts: customer receipts and TDS ledger (single source of truth) ───────────────
+// A receipt is money actually received from a customer, optionally split across several of
+// their invoices in one go; whatever isn't allocated stays visible as that customer's advance
+// until someone explicitly applies it. TDS the customer deducted is tracked as a separate
+// ledger — it reduces the invoice balance but is never counted as cash collected.
+export type ReceiptClearance = "Cleared" | "Pending Clearance";
+export type LedgerStatus = "Posted" | "Reversed";
+export type ReceiptAllocation = { invoiceId: string; amount: number };
+export type CustomerReceipt = {
+  id: string; customer: string; date: string; amount: number; mode: PaymentMode;
+  reference?: string; notes?: string; clearance: ReceiptClearance;
+  allocations: ReceiptAllocation[];
+  recordedBy: string; recordedAt: string;
+  status: LedgerStatus; reversedReason?: string; reversedBy?: string; reversedAt?: string;
+};
+export type TdsVerification = "Pending" | "Verified";
+export type CustomerTds = {
+  id: string; invoiceId: string; customer: string; amount: number; date: string;
+  reference?: string; attachment?: string; verification: TdsVerification;
+  recordedBy: string; recordedAt: string;
+  status: LedgerStatus; reversedReason?: string; reversedBy?: string; reversedAt?: string;
+};
+
+/** Cleared, non-reversed allocations against one invoice — the only receipts that count toward
+ *  settlement. A cheque still Pending Clearance is tracked (so it can't be double-allocated)
+ *  but does not yet reduce the balance. */
+export function invoiceReceiptsApplied(invoiceId: string, receipts: CustomerReceipt[]) {
+  return receipts.filter((receipt) => receipt.status === "Posted" && receipt.clearance === "Cleared")
+    .flatMap((receipt) => receipt.allocations.filter((allocation) => allocation.invoiceId === invoiceId))
+    .reduce((sum, allocation) => sum + allocation.amount, 0);
+}
+export function invoiceTdsRecorded(invoiceId: string, tds: CustomerTds[]) {
+  return tds.filter((entry) => entry.invoiceId === invoiceId && entry.status === "Posted").reduce((sum, entry) => sum + entry.amount, 0);
+}
+/** Every allocation ever made against an invoice, cleared or not — used only to stop a receipt
+ *  from over-allocating a balance that a pending cheque has already claimed part of. */
+export function invoiceCommitted(invoiceId: string, receipts: CustomerReceipt[]) {
+  return receipts.filter((receipt) => receipt.status === "Posted")
+    .flatMap((receipt) => receipt.allocations.filter((allocation) => allocation.invoiceId === invoiceId))
+    .reduce((sum, allocation) => sum + allocation.amount, 0);
+}
+export function paidSoFar(invoice: Invoice, receipts: CustomerReceipt[]) { return invoiceReceiptsApplied(invoice.id, receipts); }
 export function invoiceTotals(invoice: Invoice) { return totalsFor(invoice.items, invoice.customerState === COMPANY.state, invoice.overallDiscount, invoice.freightCharges); }
-export function balanceOf(invoice: Invoice) { return Math.max(invoiceTotals(invoice).grandTotal - paidSoFar(invoice), 0); }
-export function invoiceStatusFor(invoice: Invoice): InvoiceDisplayStatus {
-  if ((invoice.status === "Sent" || invoice.status === "Partly paid") && dayDifference(invoice.dueDate) < 0) return "Overdue";
+export function balanceOf(invoice: Invoice, receipts: CustomerReceipt[], tds: CustomerTds[]) {
+  return Math.max(invoiceTotals(invoice).grandTotal - invoiceReceiptsApplied(invoice.id, receipts) - invoiceTdsRecorded(invoice.id, tds), 0);
+}
+export function invoicePaymentStatus(invoice: Invoice, receipts: CustomerReceipt[], tds: CustomerTds[]): InvoicePaymentStatus {
+  const applied = invoiceReceiptsApplied(invoice.id, receipts) + invoiceTdsRecorded(invoice.id, tds);
+  if (applied <= 0.005) return "Unpaid";
+  return balanceOf(invoice, receipts, tds) <= 0.005 ? "Paid" : "Partly Paid";
+}
+export function invoiceStatusFor(invoice: Invoice, receipts: CustomerReceipt[], tds: CustomerTds[]): InvoiceDisplayStatus {
+  if (invoice.status === "Sent" && invoicePaymentStatus(invoice, receipts, tds) !== "Paid" && dayDifference(invoice.dueDate) < 0) return "Overdue";
   return invoice.status;
+}
+/** Unallocated money from a customer's cleared receipts — kept separate until someone applies
+ *  it to an invoice by hand; never used silently to mark something paid. */
+export function customerAdvance(customer: string, receipts: CustomerReceipt[]) {
+  return receipts.filter((receipt) => receipt.customer === customer && receipt.status === "Posted" && receipt.clearance === "Cleared")
+    .reduce((sum, receipt) => sum + (receipt.amount - receipt.allocations.reduce((total, allocation) => total + allocation.amount, 0)), 0);
+}
+export function customerPendingClearance(customer: string, receipts: CustomerReceipt[]) {
+  return receipts.filter((receipt) => receipt.customer === customer && receipt.status === "Posted" && receipt.clearance === "Pending Clearance").reduce((sum, receipt) => sum + receipt.amount, 0);
+}
+/** Same invoice, same TDS amount recorded again — a real (if unusual) coincidence can happen on
+ *  a further partial payment, so this is a review warning, never an automatic block. */
+export function duplicateCustomerTds(tds: CustomerTds[], invoiceId: string, amount: number, excludeId?: string) {
+  return tds.filter((entry) => entry.id !== excludeId && entry.invoiceId === invoiceId && entry.amount === amount && entry.status === "Posted");
+}
+export function duplicateReceiptReference(receipts: CustomerReceipt[], reference: string, excludeId?: string) {
+  if (!reference.trim()) return [];
+  return receipts.filter((receipt) => receipt.id !== excludeId && receipt.status !== "Reversed" && receipt.reference?.trim().toLowerCase() === reference.trim().toLowerCase());
+}
+
+export function recordCustomerReceipt(current: Store, receipt: CustomerReceipt): Partial<Store> {
+  return { customerReceipts: [receipt, ...current.customerReceipts] };
+}
+export function recordCustomerTds(current: Store, entry: CustomerTds): Partial<Store> {
+  return { customerTds: [entry, ...current.customerTds] };
+}
+export function clearCustomerReceipt(current: Store, receiptId: string): Partial<Store> {
+  return { customerReceipts: current.customerReceipts.map((receipt) => receipt.id === receiptId ? { ...receipt, clearance: "Cleared" as const } : receipt) };
+}
+export function reverseCustomerReceipt(current: Store, receiptId: string, reviewer: string, reason: string): Partial<Store> {
+  return { customerReceipts: current.customerReceipts.map((receipt) => receipt.id !== receiptId || receipt.status === "Reversed" ? receipt : { ...receipt, status: "Reversed" as const, reversedReason: reason, reversedBy: reviewer, reversedAt: stamp() }) };
+}
+export function verifyCustomerTds(current: Store, tdsId: string): Partial<Store> {
+  return { customerTds: current.customerTds.map((entry) => entry.id === tdsId ? { ...entry, verification: "Verified" as const } : entry) };
+}
+export function reverseCustomerTds(current: Store, tdsId: string, reviewer: string, reason: string): Partial<Store> {
+  return { customerTds: current.customerTds.map((entry) => entry.id !== tdsId || entry.status === "Reversed" ? entry : { ...entry, status: "Reversed" as const, reversedReason: reason, reversedBy: reviewer, reversedAt: stamp() }) };
 }
 
 export const seedInvoices: Invoice[] = [
-  { id: "INV-2026-0118", number: "INV-2026-0118", customer: "Nova Instruments", contact: "Rhea Mehta", customerGstin: "29AABCN4106D1Z7", customerState: "Karnataka", billingAddress: "12, HAL 2nd Stage, Indiranagar, Bengaluru, Karnataka 560038", shippingAddress: "Materials Lab, Nova Instruments, Bengaluru, Karnataka 560038", paymentTerms: "Net 30", invoiceDate: "2026-08-20", dueDate: "2026-09-19", status: "Sent", invoiceType: "Sales", poNumber: "NI/PO/2026/318", poDate: "2026-08-18", deliveryNote: "DN-4471", vehicleNumber: "KA 01 AB 4471", placeOfSupply: "Karnataka", irn: "", ewayBill: "", freightCharges: 0, overallDiscount: 0, items: [{ id: "i118-1", item: "Optical Microscope MX-5", description: "Optical microscope with 5 MP imaging", hsn: "9011", quantity: 1, rate: 215000, gst: 18, stockCode: "INS-0042" }], payments: [], sentAt: "20 Aug 2026", activities: [{ title: "Invoice sent to Rhea Mehta", meta: "20 Aug 2026 · Arun Kumar", tone: "sent" }] },
-  { id: "INV-2026-0117", number: "INV-2026-0117", customer: "Arka Diagnostics", contact: "Meera Nair", customerGstin: "29AAECA5512M1Z3", customerState: "Karnataka", billingAddress: "44, Peenya Industrial Area, Bengaluru, Karnataka 560058", shippingAddress: "44, Peenya Industrial Area, Bengaluru, Karnataka 560058", paymentTerms: "Net 30", invoiceDate: "2026-08-05", dueDate: "2026-09-04", status: "Sent", invoiceType: "Sales", poNumber: "ARK/PO/2026/061", poDate: "2026-08-02", deliveryNote: "", vehicleNumber: "", placeOfSupply: "Karnataka", irn: "", ewayBill: "", freightCharges: 0, overallDiscount: 0, items: [{ id: "i117-1", item: "AFM probe tips — 10 pack", description: "Consumable AFM probe tips, pack of 10", hsn: "9012", quantity: 4, rate: 18500, gst: 18, stockCode: "INS-0118" }], payments: [], sentAt: "05 Aug 2026", activities: [{ title: "Invoice sent to Meera Nair", meta: "05 Aug 2026 · Priya Shah", tone: "sent" }] },
-  { id: "INV-2026-0116", number: "INV-2026-0116", customer: "Tera Research", contact: "Sana Iyer", customerGstin: "33AABCT6281H1ZA", customerState: "Tamil Nadu", billingAddress: "21, OMR Road, Thoraipakkam, Chennai, Tamil Nadu 600097", shippingAddress: "Surface Science Lab, OMR Road, Chennai, Tamil Nadu 600097", paymentTerms: "Net 30", invoiceDate: "2026-09-10", dueDate: "2026-10-10", status: "Partly paid", invoiceType: "Sales", poNumber: "TR/PO/2026/119", poDate: "2026-09-10", deliveryNote: "DN-4460", vehicleNumber: "", placeOfSupply: "Tamil Nadu", irn: "", ewayBill: "", freightCharges: 0, overallDiscount: 0, items: [{ id: "i116-1", item: "Surface Profilometer", description: "Surface profilometer, standard measurement package", hsn: "9027", quantity: 1, rate: 1090000, gst: 18 }, { id: "i116-2", item: "On-site commissioning", description: "Installation and commissioning", hsn: "9987", quantity: 1, rate: 130000, gst: 18 }], payments: [{ id: "p1", date: "2026-09-12", amount: 700000, mode: "Bank", reference: "HDFC/NEFT/99821", tds: 0 }], sentAt: "10 Sep 2026", fromQuote: "QT-2026-0827 R1", activities: [{ title: "Part payment received ₹7,00,000", meta: "12 Sep 2026 · Arun Kumar", tone: "paid" }, { title: "Invoice sent to Sana Iyer", meta: "10 Sep 2026 · Priya Shah", tone: "sent" }] },
-  { id: "INV-2026-0115", number: "INV-2026-0115", customer: "Helix Labs", contact: "Kiran Rao", customerGstin: "36AABCH2119P1Z5", customerState: "Telangana", billingAddress: "Plot 7, Genome Valley, Hyderabad, Telangana 500078", shippingAddress: "Plot 7, Genome Valley, Hyderabad, Telangana 500078", paymentTerms: "Net 15", invoiceDate: "2026-08-28", dueDate: "2026-09-12", status: "Paid", invoiceType: "Service", poNumber: "HL/PO/2026/443", poDate: "2026-08-26", deliveryNote: "", vehicleNumber: "", placeOfSupply: "Telangana", irn: "", ewayBill: "", freightCharges: 0, overallDiscount: 0, items: [{ id: "i115-1", item: "Annual maintenance contract", description: "AMC for optical microscopy bench, 12 months", hsn: "9987", quantity: 1, rate: 145000, gst: 18 }], payments: [{ id: "p2", date: "2026-09-09", amount: 156600, mode: "UPI", reference: "UPI/442198", tds: 14500 }], sentAt: "28 Aug 2026", activities: [{ title: "Payment received in full", meta: "09 Sep 2026 · Arun Kumar", tone: "paid" }, { title: "Invoice sent to Kiran Rao", meta: "28 Aug 2026 · Arun Kumar", tone: "sent" }] },
-  { id: "INV-2026-0114", number: "INV-2026-0114", customer: "Vector Bio Labs", contact: "Nikhil Arora", customerGstin: "27AABCV8041G1ZQ", customerState: "Maharashtra", billingAddress: "88, MIDC Andheri East, Mumbai, Maharashtra 400093", shippingAddress: "88, MIDC Andheri East, Mumbai, Maharashtra 400093", paymentTerms: "Net 45", invoiceDate: "2026-09-15", dueDate: "2026-10-30", status: "Draft", invoiceType: "Sales", poNumber: "", poDate: "", deliveryNote: "", vehicleNumber: "", placeOfSupply: "Maharashtra", irn: "", ewayBill: "", freightCharges: 0, overallDiscount: 0, items: [{ id: "i114-1", item: "Digital temperature controller", description: "PID digital temperature controller", hsn: "9032", quantity: 2, rate: 128500, gst: 18 }], payments: [], activities: [{ title: "Draft created", meta: "15 Sep 2026 · Priya Shah", tone: "system" }] },
-  { id: "INV-2026-0113", number: "INV-2026-0113", customer: "Helix Labs", contact: "Kiran Rao", customerGstin: "36AABCH2119P1Z5", customerState: "Telangana", billingAddress: "Plot 7, Genome Valley, Hyderabad, Telangana 500078", shippingAddress: "Plot 7, Genome Valley, Hyderabad, Telangana 500078", paymentTerms: "Net 15", invoiceDate: "2026-08-20", dueDate: "2026-09-04", status: "Cancelled", invoiceType: "Sales", poNumber: "", poDate: "", deliveryNote: "", vehicleNumber: "", placeOfSupply: "Telangana", irn: "", ewayBill: "", freightCharges: 0, overallDiscount: 0, items: [{ id: "i113-1", item: "Vacuum seal kit", description: "Vacuum seal maintenance kit", hsn: "8484", quantity: 3, rate: 12400, gst: 18 }], payments: [], sentAt: "20 Aug 2026", activities: [{ title: "Invoice cancelled — duplicate of INV-2026-0112", meta: "22 Aug 2026 · Arun Kumar", tone: "system" }] },
+  { id: "INV-2026-0118", number: "INV-2026-0118", customer: "Nova Instruments", contact: "Rhea Mehta", customerGstin: "29AABCN4106D1Z7", customerState: "Karnataka", billingAddress: "12, HAL 2nd Stage, Indiranagar, Bengaluru, Karnataka 560038", shippingAddress: "Materials Lab, Nova Instruments, Bengaluru, Karnataka 560038", paymentTerms: "Net 30", invoiceDate: "2026-08-20", dueDate: "2026-09-19", status: "Sent", invoiceType: "Sales", poNumber: "NI/PO/2026/318", poDate: "2026-08-18", deliveryNote: "DN-4471", vehicleNumber: "KA 01 AB 4471", placeOfSupply: "Karnataka", irn: "", ewayBill: "", freightCharges: 0, overallDiscount: 0, items: [{ id: "i118-1", item: "Optical Microscope MX-5", description: "Optical microscope with 5 MP imaging", hsn: "9011", quantity: 1, rate: 215000, gst: 18, stockCode: "INS-0042" }], sentAt: "20 Aug 2026", activities: [{ title: "Invoice sent to Rhea Mehta", meta: "20 Aug 2026 · Arun Kumar", tone: "sent" }] },
+  { id: "INV-2026-0117", number: "INV-2026-0117", customer: "Arka Diagnostics", contact: "Meera Nair", customerGstin: "29AAECA5512M1Z3", customerState: "Karnataka", billingAddress: "44, Peenya Industrial Area, Bengaluru, Karnataka 560058", shippingAddress: "44, Peenya Industrial Area, Bengaluru, Karnataka 560058", paymentTerms: "Net 30", invoiceDate: "2026-08-05", dueDate: "2026-09-04", status: "Sent", invoiceType: "Sales", poNumber: "ARK/PO/2026/061", poDate: "2026-08-02", deliveryNote: "", vehicleNumber: "", placeOfSupply: "Karnataka", irn: "", ewayBill: "", freightCharges: 0, overallDiscount: 0, items: [{ id: "i117-1", item: "AFM probe tips — 10 pack", description: "Consumable AFM probe tips, pack of 10", hsn: "9012", quantity: 4, rate: 18500, gst: 18, stockCode: "INS-0118" }], sentAt: "05 Aug 2026", activities: [{ title: "Invoice sent to Meera Nair", meta: "05 Aug 2026 · Priya Shah", tone: "sent" }] },
+  { id: "INV-2026-0116", number: "INV-2026-0116", customer: "Tera Research", contact: "Sana Iyer", customerGstin: "33AABCT6281H1ZA", customerState: "Tamil Nadu", billingAddress: "21, OMR Road, Thoraipakkam, Chennai, Tamil Nadu 600097", shippingAddress: "Surface Science Lab, OMR Road, Chennai, Tamil Nadu 600097", paymentTerms: "Net 30", invoiceDate: "2026-09-10", dueDate: "2026-10-10", status: "Sent", invoiceType: "Sales", poNumber: "TR/PO/2026/119", poDate: "2026-09-10", deliveryNote: "DN-4460", vehicleNumber: "", placeOfSupply: "Tamil Nadu", irn: "", ewayBill: "", freightCharges: 0, overallDiscount: 0, items: [{ id: "i116-1", item: "Surface Profilometer", description: "Surface profilometer, standard measurement package", hsn: "9027", quantity: 1, rate: 1090000, gst: 18 }, { id: "i116-2", item: "On-site commissioning", description: "Installation and commissioning", hsn: "9987", quantity: 1, rate: 130000, gst: 18 }], sentAt: "10 Sep 2026", fromQuote: "QT-2026-0827 R1", activities: [{ title: "Part payment received ₹7,00,000", meta: "12 Sep 2026 · Arun Kumar", tone: "paid" }, { title: "Invoice sent to Sana Iyer", meta: "10 Sep 2026 · Priya Shah", tone: "sent" }] },
+  { id: "INV-2026-0115", number: "INV-2026-0115", customer: "Helix Labs", contact: "Kiran Rao", customerGstin: "36AABCH2119P1Z5", customerState: "Telangana", billingAddress: "Plot 7, Genome Valley, Hyderabad, Telangana 500078", shippingAddress: "Plot 7, Genome Valley, Hyderabad, Telangana 500078", paymentTerms: "Net 15", invoiceDate: "2026-08-28", dueDate: "2026-09-12", status: "Sent", invoiceType: "Service", poNumber: "HL/PO/2026/443", poDate: "2026-08-26", deliveryNote: "", vehicleNumber: "", placeOfSupply: "Telangana", irn: "", ewayBill: "", freightCharges: 0, overallDiscount: 0, items: [{ id: "i115-1", item: "Annual maintenance contract", description: "AMC for optical microscopy bench, 12 months", hsn: "9987", quantity: 1, rate: 145000, gst: 18 }], sentAt: "28 Aug 2026", activities: [{ title: "Payment received in full", meta: "09 Sep 2026 · Arun Kumar", tone: "paid" }, { title: "Invoice sent to Kiran Rao", meta: "28 Aug 2026 · Arun Kumar", tone: "sent" }] },
+  { id: "INV-2026-0114", number: "INV-2026-0114", customer: "Vector Bio Labs", contact: "Nikhil Arora", customerGstin: "27AABCV8041G1ZQ", customerState: "Maharashtra", billingAddress: "88, MIDC Andheri East, Mumbai, Maharashtra 400093", shippingAddress: "88, MIDC Andheri East, Mumbai, Maharashtra 400093", paymentTerms: "Net 45", invoiceDate: "2026-09-15", dueDate: "2026-10-30", status: "Draft", invoiceType: "Sales", poNumber: "", poDate: "", deliveryNote: "", vehicleNumber: "", placeOfSupply: "Maharashtra", irn: "", ewayBill: "", freightCharges: 0, overallDiscount: 0, items: [{ id: "i114-1", item: "Digital temperature controller", description: "PID digital temperature controller", hsn: "9032", quantity: 2, rate: 128500, gst: 18 }], activities: [{ title: "Draft created", meta: "15 Sep 2026 · Priya Shah", tone: "system" }] },
+  { id: "INV-2026-0113", number: "INV-2026-0113", customer: "Helix Labs", contact: "Kiran Rao", customerGstin: "36AABCH2119P1Z5", customerState: "Telangana", billingAddress: "Plot 7, Genome Valley, Hyderabad, Telangana 500078", shippingAddress: "Plot 7, Genome Valley, Hyderabad, Telangana 500078", paymentTerms: "Net 15", invoiceDate: "2026-08-20", dueDate: "2026-09-04", status: "Cancelled", invoiceType: "Sales", poNumber: "", poDate: "", deliveryNote: "", vehicleNumber: "", placeOfSupply: "Telangana", irn: "", ewayBill: "", freightCharges: 0, overallDiscount: 0, items: [{ id: "i113-1", item: "Vacuum seal kit", description: "Vacuum seal maintenance kit", hsn: "8484", quantity: 3, rate: 12400, gst: 18 }], sentAt: "20 Aug 2026", activities: [{ title: "Invoice cancelled — duplicate of INV-2026-0112", meta: "22 Aug 2026 · Arun Kumar", tone: "system" }] },
 ];
 
 // AMC / service contracts. NOT USED BY ANY SCREEN RIGHT NOW — the Due Dates AMC tab and its
@@ -269,8 +356,70 @@ export function statutoryDues(fromMonth: string): StatutoryDue[] {
   return dues;
 }
 
-// Recurring company bills from Settings → Expense Types.
+// Recurring company bills from Settings → Expense Types. Superseded by Accounts → Bills &
+// Expenses (Payable, below), which is the one source of truth for what SPM owes and what it
+// has paid. Kept, with its seed, only because Due Dates' "To pay" section still reads it;
+// not read by Accounts.
 export type CompanyBill = { id: string; name: string; vendor: string; amount: number; dueDate: string; owner: string; every: string; payments?: PaymentRecord[] };
+
+// ─── Accounts: Bills & Expenses (supplier bills, company bills and their payments) ─────
+// One ledger for both a supplier's invoice and a recurring company bill — they differ only by
+// category. A Purchase Order never creates a Payable by itself (see PurchaseOrder.vendorBill,
+// which is a separate, older mechanism); a Payable is only ever created explicitly, optionally
+// citing a PO for reference.
+export type PayableCategory = "Supplier Purchase" | "Rent" | "Electricity" | "Internet / Phone" | "Office Expense" | "Other";
+export const PAYABLE_CATEGORIES: PayableCategory[] = ["Supplier Purchase", "Rent", "Electricity", "Internet / Phone", "Office Expense", "Other"];
+export type PayablePaymentStatus = "Unpaid" | "Partly Paid" | "Paid";
+export type Payable = {
+  id: string; number?: string; payee: string; category: PayableCategory;
+  billDate: string; dueDate: string; amount: number; description: string;
+  attachment?: string; poRef?: string; recurringLabel?: string; clonedFrom?: string;
+  createdBy: string; createdAt: string;
+  status: LedgerStatus; reversedReason?: string; reversedBy?: string; reversedAt?: string;
+};
+export type SupplierPayment = {
+  id: string; billId: string; date: string; amount: number; mode: PaymentMode;
+  reference?: string; notes?: string; tds?: number;
+  recordedBy: string; recordedAt: string;
+  status: LedgerStatus; reversedReason?: string; reversedBy?: string; reversedAt?: string;
+};
+
+export function payableAppliedPayments(billId: string, payments: SupplierPayment[]) {
+  return payments.filter((payment) => payment.billId === billId && payment.status === "Posted").reduce((sum, payment) => sum + payment.amount, 0);
+}
+export function payableTdsRecorded(billId: string, payments: SupplierPayment[]) {
+  return payments.filter((payment) => payment.billId === billId && payment.status === "Posted").reduce((sum, payment) => sum + (payment.tds ?? 0), 0);
+}
+export function payableBalance(bill: Payable, payments: SupplierPayment[]) {
+  return Math.max(bill.amount - payableAppliedPayments(bill.id, payments) - payableTdsRecorded(bill.id, payments), 0);
+}
+export function payablePaymentStatus(bill: Payable, payments: SupplierPayment[]): PayablePaymentStatus {
+  const applied = payableAppliedPayments(bill.id, payments) + payableTdsRecorded(bill.id, payments);
+  if (applied <= 0.005) return "Unpaid";
+  return payableBalance(bill, payments) <= 0.005 ? "Paid" : "Partly Paid";
+}
+/** Same supplier, same bill number — a real warning worth surfacing, since re-keying the same
+ *  bill twice is the most common way a payable gets duplicated. Never an automatic block. */
+export function duplicateBillNumber(bills: Payable[], payee: string, number: string, excludeId?: string) {
+  if (!number.trim()) return [];
+  return bills.filter((bill) => bill.id !== excludeId && bill.status !== "Reversed" && bill.payee === payee && (bill.number ?? "").trim().toLowerCase() === number.trim().toLowerCase());
+}
+export function duplicatePaymentReference(payments: SupplierPayment[], reference: string, excludeId?: string) {
+  if (!reference.trim()) return [];
+  return payments.filter((payment) => payment.id !== excludeId && payment.status !== "Reversed" && payment.reference?.trim().toLowerCase() === reference.trim().toLowerCase());
+}
+export function addPayable(current: Store, bill: Payable, payment?: SupplierPayment): Partial<Store> {
+  return { payables: [bill, ...current.payables], supplierPayments: payment ? [payment, ...current.supplierPayments] : current.supplierPayments };
+}
+export function recordSupplierPayment(current: Store, payment: SupplierPayment): Partial<Store> {
+  return { supplierPayments: [payment, ...current.supplierPayments] };
+}
+export function reverseBill(current: Store, billId: string, reviewer: string, reason: string): Partial<Store> {
+  return { payables: current.payables.map((bill) => bill.id !== billId || bill.status === "Reversed" ? bill : { ...bill, status: "Reversed" as const, reversedReason: reason, reversedBy: reviewer, reversedAt: stamp() }) };
+}
+export function reverseSupplierPayment(current: Store, paymentId: string, reviewer: string, reason: string): Partial<Store> {
+  return { supplierPayments: current.supplierPayments.map((payment) => payment.id !== paymentId || payment.status === "Reversed" ? payment : { ...payment, status: "Reversed" as const, reversedReason: reason, reversedBy: reviewer, reversedAt: stamp() }) };
+}
 
 
 // Customer-owned instruments we calibrate or service. Kept separate from Stock, which is
@@ -809,6 +958,8 @@ type Store = {
   snoozed: Record<string, string>; instruments: CustomerInstrument[]; jobs: Job[];
   leaves: LeaveRequest[]; holidays: Holiday[]; attendance: AttendanceEvent[]; corrections: Correction[];
   expenses: Expense[]; advancePayments: ExpensePayment[];
+  customerReceipts: CustomerReceipt[]; customerTds: CustomerTds[];
+  payables: Payable[]; supplierPayments: SupplierPayment[];
 };
 
 // ─── Advance & Expense actions ──────────────────────────────────────────────
@@ -983,6 +1134,40 @@ let state: Store = {
     { id: "ADV-001", engineer: "Nikhil Rao", type: "Advance Paid", amount: 5000, date: "2026-09-10", mode: "Cash", jobId: undefined, notes: "Advance for the week's Whitefield and Biocon visits.", recordedBy: "Priya Shah", recordedAt: "10 Sep 2026 · 09:00 AM", status: "Posted" },
     { id: "ADV-002", engineer: "Anitha Raj", type: "Advance Paid", amount: 2000, date: "2026-09-05", mode: "UPI", reference: "UPI/440210", notes: "Advance for the Tera Research trip.", recordedBy: "Priya Shah", recordedAt: "05 Sep 2026 · 10:15 AM", status: "Posted" },
     { id: "ADV-003", engineer: "Sandeep Kulkarni", type: "Advance Paid", amount: 500, date: "2026-09-01", mode: "Cash", notes: "Recorded against the wrong engineer by mistake.", recordedBy: "Priya Shah", recordedAt: "01 Sep 2026 · 11:00 AM", status: "Reversed", reversedReason: "Advance was actually paid to Nikhil Rao, not Sandeep Kulkarni — recorded against the wrong person.", reversedBy: "Arun Kumar", reversedAt: "02 Sep 2026 · 09:30 AM" },
+  ],
+
+  customerReceipts: [
+    { id: "RCP-001", customer: "Tera Research", date: "2026-09-12", amount: 700000, mode: "Bank", reference: "HDFC/NEFT/99821", clearance: "Cleared", allocations: [{ invoiceId: "INV-2026-0116", amount: 700000 }], recordedBy: "Arun Kumar", recordedAt: "12 Sep 2026 · 10:20 AM", status: "Posted" },
+    { id: "RCP-002", customer: "Helix Labs", date: "2026-09-09", amount: 156600, mode: "UPI", reference: "UPI/442198", clearance: "Cleared", allocations: [{ invoiceId: "INV-2026-0115", amount: 156600 }], recordedBy: "Arun Kumar", recordedAt: "09 Sep 2026 · 09:15 AM", status: "Posted" },
+    // Received more than the one open invoice needed — the extra stays visible as Nova's advance.
+    { id: "RCP-003", customer: "Nova Instruments", date: "2026-09-14", amount: 300000, mode: "Bank", reference: "NOVA/NEFT/7724", clearance: "Cleared", allocations: [{ invoiceId: "INV-2026-0118", amount: 253700 }], recordedBy: "Priya Shah", recordedAt: "14 Sep 2026 · 03:40 PM", status: "Posted" },
+    // A cheque banked but not yet cleared — allocated so it can't be recorded twice, but it does
+    // not reduce the invoice balance or count as collected until it clears.
+    { id: "RCP-004", customer: "Arka Diagnostics", date: "2026-09-16", amount: 87320, mode: "Cheque", reference: "CHQ-004821", clearance: "Pending Clearance", allocations: [{ invoiceId: "INV-2026-0117", amount: 87320 }], recordedBy: "Priya Shah", recordedAt: "16 Sep 2026 · 11:05 AM", status: "Posted" },
+    { id: "RCP-005", customer: "Arka Diagnostics", date: "2026-09-03", amount: 20000, mode: "Cash", clearance: "Cleared", allocations: [], recordedBy: "Priya Shah", recordedAt: "03 Sep 2026 · 04:20 PM", status: "Reversed", reversedReason: "Recorded against the wrong customer by mistake — should have been Vector Bio Labs.", reversedBy: "Arun Kumar", reversedAt: "04 Sep 2026 · 09:10 AM" },
+  ],
+  customerTds: [
+    // Invoice ₹1,71,100; ₹1,56,600 received by UPI; ₹14,500 TDS recorded — balance ₹0, but the
+    // deduction is still awaiting the certificate, so verification stays visible either way.
+    { id: "TDS-001", invoiceId: "INV-2026-0115", customer: "Helix Labs", amount: 14500, date: "2026-09-09", reference: "Awaiting Form 16A", verification: "Pending", recordedBy: "Arun Kumar", recordedAt: "09 Sep 2026 · 09:20 AM", status: "Posted" },
+  ],
+
+  payables: [
+    // A received PO does not create a payable by itself — this bill was entered explicitly,
+    // citing PO-24091 for reference, once the vendor's actual invoice arrived.
+    { id: "BILL-PSI", number: "PSI/INV/2026/551", payee: "Precision Systems India", category: "Supplier Purchase", billDate: "2026-09-02", dueDate: "2026-10-02", amount: 231280, description: "Vacuum seal kit, 20 units", poRef: "PO-24091", createdBy: "Arun Kumar", createdAt: "14 Sep 2026 · 11:00 AM", status: "Posted" },
+    { id: "BILL-OFC", number: "BLS/INV/2026/220", payee: "Bengaluru Lab Spares", category: "Supplier Purchase", billDate: "2026-09-05", dueDate: "2026-10-05", amount: 35400, description: "Consumables — probe tips and lens cloth", createdBy: "Priya Shah", createdAt: "05 Sep 2026 · 03:10 PM", status: "Posted" },
+    { id: "BILL-OTH", payee: "Bruker Services", category: "Other", billDate: "2026-09-08", dueDate: "2026-09-30", amount: 42000, description: "Annual AFM probe station service contract", createdBy: "Arun Kumar", createdAt: "08 Sep 2026 · 10:00 AM", status: "Posted" },
+    { id: "BILL-WORK", payee: "WeWork", category: "Office Expense", billDate: "2026-09-01", dueDate: "2026-09-25", amount: 18000, description: "Shared desk seats, September", createdBy: "Priya Shah", createdAt: "01 Sep 2026 · 09:00 AM", status: "Posted" },
+    { id: "BILL-MISTAKE", number: "NS/INV/2026/090", payee: "Nanotech Supplies", category: "Supplier Purchase", billDate: "2026-08-28", dueDate: "2026-09-10", amount: 15000, description: "O-ring assortment", createdBy: "Priya Shah", createdAt: "28 Aug 2026 · 02:00 PM", status: "Posted" },
+  ],
+  supplierPayments: [
+    // Marked "Already paid" when the bill was entered — one bill, one linked payment.
+    { id: "SP-001", billId: "BILL-OFC", date: "2026-09-05", amount: 35400, mode: "Cash", recordedBy: "Priya Shah", recordedAt: "05 Sep 2026 · 03:10 PM", notes: "Recorded via \"Already paid\" at bill entry.", status: "Posted" },
+    // Partial payment, with a supplier TDS deduction recorded for audit — not a statement that
+    // it has been deposited or that the statutory obligation is complete.
+    { id: "SP-002", billId: "BILL-OTH", date: "2026-09-12", amount: 20000, mode: "Bank", reference: "BRK/NEFT/331", tds: 2000, recordedBy: "Arun Kumar", recordedAt: "12 Sep 2026 · 04:00 PM", status: "Posted" },
+    { id: "SP-003", billId: "BILL-MISTAKE", date: "2026-09-08", amount: 15000, mode: "Cash", recordedBy: "Priya Shah", recordedAt: "08 Sep 2026 · 09:40 AM", status: "Reversed", reversedReason: "Recorded against the wrong vendor bill by mistake — payment was actually for a different Nanotech Supplies invoice.", reversedBy: "Arun Kumar", reversedAt: "09 Sep 2026 · 10:00 AM" },
   ],
 };
 

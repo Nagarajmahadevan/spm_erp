@@ -13,7 +13,7 @@ const displayStamp = (value: string) => /^\d{4}-\d\d-\d\dT/.test(value) ? istSta
 const correctionKinds: CorrectionKind[] = ["Missed punch", "Wrong job link", "Location exception", "Overlapping event"];
 const eventKinds: AttendanceEventKind[] = ["Office check-in", "Office checkout", "Site check-in", "Site checkout"];
 
-function dayRecord(store: Store, engineer: string, date: string) {
+export function dayRecord(store: Store, engineer: string, date: string) {
   const events = eventsFor(store.attendance, engineer, date);
   const status = attendanceStatusFor(store.attendance, store.leaves, store.holidays, engineer, date);
   const visits = visitsOn(store.jobs, date, nowIso()).filter((visit) => visit.engineer === engineer && visit.visitStatus !== "Cancelled");

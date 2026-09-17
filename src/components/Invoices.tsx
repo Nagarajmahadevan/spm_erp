@@ -1,21 +1,24 @@
 import { useMemo, useState } from "react";
 import spmLogo from "@/imports/SPM_Logo.png";
 import { COMPANY, INDIAN_STATES, customerMaster, stockCatalog, initialQuotes, money, stamp, dateIso, dayDifference, prettyDate, lineValue, totalsFor, numberWords, type Quote } from "./erpMasters";
-import { balanceOf, invoiceStatusFor as statusFor, invoiceTotals, paidSoFar, updateStore, useErpStore, type Invoice, type InvoiceDisplayStatus as DisplayStatus, type InvoiceLine, type InvoiceActivity, type InvoiceStatus, type Payment, type PaymentMode } from "./erpStore";
+import { balanceOf, invoicePaymentStatus, invoiceReceiptsApplied, invoiceStatusFor as statusFor, invoiceTdsRecorded, invoiceTotals, updateStore, useErpStore, type Invoice, type InvoiceDisplayStatus as DisplayStatus, type InvoiceLine, type InvoiceActivity } from "./erpStore";
+import { RecordReceipt } from "./Accounts";
 
 const INVOICE_SERIES = { prefix: "INV-2026-", next: 119 };
 const TERM_DAYS: Record<string, number> = { "Net 15": 15, "Net 30": 30, "Net 45": 45, "Due on receipt": 0 };
-const filters: DisplayStatus[] = ["Draft", "Sent", "Partly paid", "Paid", "Overdue", "Cancelled"];
+// Document Status filter values only — "Issued" is how a "Sent" invoice is displayed.
+const filters: ("Draft" | "Issued" | "Overdue" | "Paid" | "Cancelled")[] = ["Draft", "Issued", "Overdue", "Paid", "Cancelled"];
+function docLabel(status: DisplayStatus) { return status === "Sent" ? "Issued" : status; }
 
 const newLine = (): InvoiceLine => ({ id: `line-${Date.now()}-${Math.random().toString(16).slice(2)}`, item: "", description: "", hsn: "", quantity: 1, rate: 0, gst: 18 });
 const isoFrom = (text?: string) => { if (!text) return ""; const parsed = new Date(text); return Number.isNaN(parsed.getTime()) ? "" : dateIso(parsed); };
 const shiftDays = (from: string, days: number) => { const date = new Date(`${from}T12:00`); date.setDate(date.getDate() + days); return dateIso(date); };
 const dueDateFor = (invoiceDate: string, terms: string) => shiftDays(invoiceDate, TERM_DAYS[terms] ?? 30);
 
-function statusClass(status: DisplayStatus) { return `invoice-status invoice-status--${status.toLowerCase().replace(/ /g, "-")}`; }
-function dueLabel(invoice: Invoice) {
+function statusClass(status: string) { return `invoice-status invoice-status--${status.toLowerCase().replace(/ /g, "-")}`; }
+function dueLabel(invoice: Invoice, paid: boolean) {
   const diff = dayDifference(invoice.dueDate);
-  if (invoice.status === "Paid" || invoice.status === "Cancelled" || invoice.status === "Draft") return prettyDate(invoice.dueDate);
+  if (paid || invoice.status === "Cancelled" || invoice.status === "Draft") return prettyDate(invoice.dueDate);
   if (diff < 0) return `${prettyDate(invoice.dueDate)} · ${Math.abs(diff)}d late`;
   if (diff === 0) return `${prettyDate(invoice.dueDate)} · today`;
   return prettyDate(invoice.dueDate);
@@ -47,7 +50,7 @@ function invoiceFromQuote(quote: Quote, number: string): Invoice {
     poNumber: quote.acceptedPo ?? "", poDate: isoFrom(quote.acceptedDate), deliveryNote: "", vehicleNumber: "",
     placeOfSupply: quote.customerState, irn: "", ewayBill: "", freightCharges: quote.freightCharges ?? 0, overallDiscount: quote.overallDiscount ?? 0,
     items: quote.items.map((line) => ({ id: `${number}-${line.id}`, item: line.item, description: line.description, hsn: line.hsn, quantity: line.quantity, rate: line.rate, gst: line.gst, stockCode: stockCodeFor(line.item) })),
-    payments: [], fromQuote: `${quote.number} R${quote.revision}`,
+    fromQuote: `${quote.number} R${quote.revision}`,
     activities: [{ title: `Started from quotation ${quote.number} R${quote.revision}`, meta: stamp(), tone: "system" }],
   };
 }
@@ -59,16 +62,17 @@ function blankInvoice(number: string): Invoice {
     billingAddress: "", shippingAddress: "", paymentTerms: "Net 30", invoiceDate, dueDate: dueDateFor(invoiceDate, "Net 30"),
     status: "Draft", invoiceType: "Sales", poNumber: "", poDate: "", deliveryNote: "", vehicleNumber: "",
     placeOfSupply: COMPANY.state, irn: "", ewayBill: "", freightCharges: 0, overallDiscount: 0,
-    items: [newLine()], payments: [], activities: [{ title: "Blank invoice started", meta: stamp(), tone: "system" }],
+    items: [newLine()], activities: [{ title: "Blank invoice started", meta: stamp(), tone: "system" }],
   };
 }
 
 
-export default function Invoices() {
-  const { invoices } = useErpStore();
+export default function Invoices({ focusInvoice }: { focusInvoice?: string } = {}) {
+  const store = useErpStore();
+  const { invoices, customerReceipts, customerTds } = store;
   const setInvoices = (change: (all: Invoice[]) => Invoice[]) => updateStore((current) => ({ invoices: change(current.invoices) }));
   const [search, setSearch] = useState(""); const [status, setStatus] = useState("All invoices");
-  const [editorId, setEditorId] = useState<string | null>(null); const [choosing, setChoosing] = useState(false); const [toast, setToast] = useState("");
+  const [editorId, setEditorId] = useState<string | null>(focusInvoice ?? null); const [choosing, setChoosing] = useState(false); const [toast, setToast] = useState("");
   const editor = invoices.find((invoice) => invoice.id === editorId) ?? null;
   const flash = (message: string) => { setToast(message); window.setTimeout(() => setToast(""), 3600); };
   const persist = (invoice: Invoice, message?: string) => {
@@ -77,26 +81,33 @@ export default function Invoices() {
   };
   const startFromQuote = (quote: Quote) => { const invoice = invoiceFromQuote(quote, nextNumber(invoices)); setInvoices((all) => [invoice, ...all]); setEditorId(invoice.id); setChoosing(false); flash(`Ready from ${quote.number}. Check it and send.`); };
   const startBlank = () => { const invoice = blankInvoice(nextNumber(invoices)); setInvoices((all) => [invoice, ...all]); setEditorId(invoice.id); setChoosing(false); };
-  const duplicate = (invoice: Invoice) => { const number = nextNumber(invoices); const copy: Invoice = { ...invoice, id: number, number, status: "Draft", sentAt: undefined, payments: [], invoiceDate: dateIso(), dueDate: dueDateFor(dateIso(), invoice.paymentTerms), irn: "", ewayBill: "", activities: [{ title: `Copied from ${invoice.number}`, meta: stamp(), tone: "system" }] }; setInvoices((all) => [copy, ...all]); setEditorId(copy.id); flash("Copy created as a draft"); };
+  const duplicate = (invoice: Invoice) => { const number = nextNumber(invoices); const copy: Invoice = { ...invoice, id: number, number, status: "Draft", sentAt: undefined, invoiceDate: dateIso(), dueDate: dueDateFor(dateIso(), invoice.paymentTerms), irn: "", ewayBill: "", activities: [{ title: `Copied from ${invoice.number}`, meta: stamp(), tone: "system" }] }; setInvoices((all) => [copy, ...all]); setEditorId(copy.id); flash("Copy created as a draft"); };
 
-  const unpaid = invoices.filter((invoice) => ["Sent", "Partly paid", "Overdue"].includes(statusFor(invoice)));
-  const overdue = invoices.filter((invoice) => statusFor(invoice) === "Overdue");
+  const unpaid = invoices.filter((invoice) => invoice.status === "Sent" && invoicePaymentStatus(invoice, customerReceipts, customerTds) !== "Paid");
+  const overdue = invoices.filter((invoice) => statusFor(invoice, customerReceipts, customerTds) === "Overdue");
   const dueThisWeek = unpaid.filter((invoice) => dayDifference(invoice.dueDate) >= 0 && dayDifference(invoice.dueDate) <= 7);
   const thisMonth = dateIso().slice(0, 7);
-  const collected = invoices.reduce((total, invoice) => total + invoice.payments.filter((payment) => payment.date.startsWith(thisMonth)).reduce((sum, payment) => sum + payment.amount + payment.tds, 0), 0);
+  // Cleared receipts only — collected excludes TDS and anything still pending clearance.
+  const collected = customerReceipts.filter((receipt) => receipt.status === "Posted" && receipt.clearance === "Cleared" && receipt.date.startsWith(thisMonth)).reduce((sum, receipt) => sum + receipt.amount, 0);
   const cards = [
-    ["Unpaid", String(unpaid.length), "Money still due", "unpaid", "Sent"],
+    ["Unpaid", String(unpaid.length), "Money still due", "unpaid", "Issued"],
     ["Overdue", String(overdue.length), "Past the due date", "overdue", "Overdue"],
-    ["Due this week", String(dueThisWeek.length), "Chase these first", "due", "Sent"],
+    ["Due this week", String(dueThisWeek.length), "Chase these first", "due", "Issued"],
     ["Collected this month", money(collected), "Received so far", "collected", "Paid"],
   ] as const;
 
+  const matchesFilter = (invoice: Invoice, filter: string) => {
+    const doc = statusFor(invoice, customerReceipts, customerTds);
+    if (filter === "Issued") return doc === "Sent";
+    if (filter === "Paid") return invoicePaymentStatus(invoice, customerReceipts, customerTds) === "Paid";
+    return doc === filter;
+  };
   const filtered = useMemo(() => invoices.filter((invoice) =>
     `${invoice.number} ${invoice.customer} ${invoice.contact}`.toLowerCase().includes(search.toLowerCase())
-    && (status === "All invoices" || statusFor(invoice) === status)), [invoices, search, status]);
+    && (status === "All invoices" || matchesFilter(invoice, status))), [invoices, search, status, customerReceipts, customerTds]);
 
   if (editor) return <>
-    <InvoiceEditor key={editor.id} invoice={editor} close={() => setEditorId(null)} persist={persist} duplicate={duplicate} flash={flash} />
+    <InvoiceEditor key={editor.id} invoice={editor} store={store} close={() => setEditorId(null)} persist={persist} duplicate={duplicate} flash={flash} />
     {toast && <div className="settings-toast" role="status">✓ {toast}</div>}
   </>;
 
@@ -107,16 +118,18 @@ export default function Invoices() {
 
     <div className="leads-toolbar quotation-toolbar"><div className="settings-list-search"><span>⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search by invoice number or customer" /></div><select value={status} onChange={(event) => setStatus(event.target.value)}><option>All invoices</option>{filters.map((item) => <option key={item}>{item}</option>)}</select></div>
 
-    <div className="leads-table-wrap"><table className="leads-table invoices-table"><thead><tr><th>Invoice no.</th><th>Customer</th><th>Date</th><th>Due date</th><th>Amount</th><th>Balance</th><th>Status</th></tr></thead><tbody>{filtered.map((invoice) => {
-      const docStatus = statusFor(invoice); const total = invoiceTotals(invoice).grandTotal; const balance = balanceOf(invoice);
+    <div className="leads-table-wrap"><table className="leads-table invoices-table"><thead><tr><th>Invoice no.</th><th>Customer</th><th>Date</th><th>Due date</th><th>Amount</th><th>Balance</th><th>Status</th><th>Payment</th></tr></thead><tbody>{filtered.map((invoice) => {
+      const docStatus = statusFor(invoice, customerReceipts, customerTds); const total = invoiceTotals(invoice).grandTotal; const balance = balanceOf(invoice, customerReceipts, customerTds);
+      const payStatus = invoicePaymentStatus(invoice, customerReceipts, customerTds); const paid = payStatus === "Paid";
       return <tr key={invoice.id} onClick={() => setEditorId(invoice.id)}>
         <td><b>{invoice.number}</b><small>{invoice.fromQuote ? `From ${invoice.fromQuote}` : invoice.invoiceType}</small></td>
         <td><b>{invoice.customer}</b><small>{invoice.contact}</small></td>
         <td>{prettyDate(invoice.invoiceDate)}</td>
-        <td className={docStatus === "Overdue" ? "invoice-overdue" : ""}>{dueLabel(invoice)}</td>
+        <td className={docStatus === "Overdue" ? "invoice-overdue" : ""}>{dueLabel(invoice, paid)}</td>
         <td className="quote-value">{money(total)}</td>
-        <td className={balance > 0 && docStatus !== "Draft" ? "invoice-balance" : "invoice-balance-clear"}>{invoice.status === "Cancelled" ? "—" : balance > 0 ? money(balance) : "Nothing due"}</td>
-        <td><span className={statusClass(docStatus)}>{docStatus}</span></td>
+        <td className={balance > 0.005 && invoice.status !== "Draft" ? "invoice-balance" : "invoice-balance-clear"}>{invoice.status === "Cancelled" ? "—" : balance > 0.005 ? money(balance) : "Nothing due"}</td>
+        <td><span className={statusClass(docStatus)}>{docLabel(docStatus)}</span></td>
+        <td>{invoice.status === "Sent" ? <span className={statusClass(payStatus)}>{payStatus}</span> : <span className="erp-muted">—</span>}</td>
       </tr>; })}</tbody></table>
       {!filtered.length && <div className="settings-empty"><b>{invoices.length ? "No invoices match what you typed" : "No invoices yet"}</b><p>{invoices.length ? "Clear the search box or pick a different status." : "Most invoices start from an accepted quotation — we will fill in the customer, items and taxes for you."}</p><button className="erp-action" onClick={() => setChoosing(true)}>+ New invoice</button></div>}
     </div>
@@ -142,13 +155,16 @@ function StartInvoice({ close, fromQuote, blank }: { close: () => void; fromQuot
   </section></div>;
 }
 
-function InvoiceEditor({ invoice, close, persist, duplicate, flash }: { invoice: Invoice; close: () => void; persist: (invoice: Invoice, message?: string) => void; duplicate: (invoice: Invoice) => void; flash: (message: string) => void }) {
+function InvoiceEditor({ invoice, store, close, persist, duplicate, flash }: { invoice: Invoice; store: ReturnType<typeof useErpStore>; close: () => void; persist: (invoice: Invoice, message?: string) => void; duplicate: (invoice: Invoice) => void; flash: (message: string) => void }) {
+  const { customerReceipts, customerTds } = store;
   const [doc, setDoc] = useState(invoice);
   const [editCustomer, setEditCustomer] = useState(false); const [confirming, setConfirming] = useState(false); const [paying, setPaying] = useState(false);
   const [overflow, setOverflow] = useState(false); const [preview, setPreview] = useState(false); const [problems, setProblems] = useState<string[]>([]);
-  const docStatus = statusFor(doc); const locked = doc.status !== "Draft";
-  const collecting = docStatus === "Sent" || docStatus === "Partly paid" || docStatus === "Overdue";
-  const localTax = doc.customerState === COMPANY.state; const totals = invoiceTotals(doc); const balance = balanceOf(doc); const received = paidSoFar(doc);
+  const docStatus = statusFor(doc, customerReceipts, customerTds); const locked = doc.status !== "Draft";
+  const payStatus = invoicePaymentStatus(doc, customerReceipts, customerTds);
+  const collecting = doc.status === "Sent" && payStatus !== "Paid";
+  const localTax = doc.customerState === COMPANY.state; const totals = invoiceTotals(doc); const balance = balanceOf(doc, customerReceipts, customerTds);
+  const received = invoiceReceiptsApplied(doc.id, customerReceipts); const tdsRecorded = invoiceTdsRecorded(doc.id, customerTds);
 
   const change = <K extends keyof Invoice>(key: K, value: Invoice[K]) => setDoc({ ...doc, [key]: value });
   const chooseCustomer = (name: string) => {
@@ -171,13 +187,6 @@ function InvoiceEditor({ invoice, close, persist, duplicate, flash }: { invoice:
     setDoc(next); setConfirming(false);
     persist(next, sold.length ? `Invoice sent. ${sold.join(", ")} marked sold.` : "Invoice sent to the customer.");
   };
-  const addPayment = (payment: Payment) => {
-    const payments = [payment, ...doc.payments];
-    const settled = invoiceTotals(doc).grandTotal - payments.reduce((total, item) => total + item.amount + item.tds, 0) <= 0;
-    const next: Invoice = { ...doc, payments, status: settled ? "Paid" : "Partly paid", activities: [{ title: `${settled ? "Payment received in full" : "Part payment received"} ${money(payment.amount + payment.tds)}`, meta: stamp(), tone: "paid" }, ...doc.activities] };
-    setDoc(next); setPaying(false);
-    persist(next, settled ? "Payment recorded. Nothing more is due." : `Payment recorded. ${money(Math.max(invoiceTotals(next).grandTotal - paidSoFar(next), 0))} still due.`);
-  };
   const cancel = () => { const next: Invoice = { ...doc, status: "Cancelled", activities: log("Invoice cancelled", "system") }; setDoc(next); setOverflow(false); persist(next, "Invoice cancelled"); };
 
   const taxNote = doc.customer ? (localTax ? `${doc.customerState} customer — CGST + SGST applies.` : `${doc.customerState || "Out-of-state"} customer — IGST applies.`) : "Choose a customer and we will work out the right tax.";
@@ -199,14 +208,14 @@ function InvoiceEditor({ invoice, close, persist, duplicate, flash }: { invoice:
         <button className="settings-outline" onClick={saveDraft}>Save draft</button>
       </>}
       {collecting && <>
-        <button className="erp-action" onClick={() => setPaying(true)}>Record payment</button>
+        <button className="erp-action" onClick={() => setPaying(true)}>Record Receipt</button>
         <button className="settings-outline" onClick={() => flash(`Reminder sent to ${doc.contact || doc.customer}`)}>Send reminder</button>
         <button className="settings-outline" onClick={() => setPreview(true)}>Preview</button>
         <div className="quote-action-anchor"><button className="settings-outline quote-overflow-button" onClick={() => setOverflow(!overflow)} aria-label="More actions">⋯</button>
           {overflow && <div className="quote-overflow-menu"><button onClick={() => { setOverflow(false); flash("WhatsApp message ready to share"); }}>Share on WhatsApp</button><button onClick={() => { setOverflow(false); flash("Credit note draft created"); }}>Credit note</button><button className="is-danger" onClick={cancel}>Cancel</button></div>}
         </div>
       </>}
-      {docStatus === "Paid" && <><button className="settings-outline" onClick={() => setPreview(true)}>Preview</button><button className="settings-outline" onClick={() => duplicate(doc)}>Duplicate</button></>}
+      {doc.status === "Sent" && payStatus === "Paid" && <><button className="settings-outline" onClick={() => setPreview(true)}>Preview</button><button className="settings-outline" onClick={() => duplicate(doc)}>Duplicate</button></>}
       {docStatus === "Cancelled" && <button className="settings-outline" onClick={() => setPreview(true)}>Preview</button>}
     </div></header>
 
@@ -268,7 +277,9 @@ function InvoiceEditor({ invoice, close, persist, duplicate, flash }: { invoice:
           {doc.freightCharges > 0 && <div><span>Freight / other charges</span><b>{money(doc.freightCharges)}</b></div>}
           <div><span>Round off</span><b>{totals.roundOff >= 0 ? "+" : "−"}{money(Math.abs(totals.roundOff))}</b></div>
           <div className="invoice-grand"><span>Grand total</span><b>{money(totals.grandTotal)}</b></div>
-          {received > 0 && <><div><span>Already received</span><b>−{money(received)}</b></div>{balance > 0 ? <div className="invoice-balance-row"><span>Money still due</span><b>{money(balance)}</b></div> : <div className="invoice-settled-row"><span>Nothing more is due</span><b>Paid in full</b></div>}</>}
+          {received > 0.005 && <div><span>Receipts applied</span><b>−{money(received)}</b></div>}
+          {tdsRecorded > 0.005 && <div><span>TDS recorded</span><b>−{money(tdsRecorded)}</b></div>}
+          {(received > 0.005 || tdsRecorded > 0.005) && (balance > 0.005 ? <div className="invoice-balance-row"><span>Money still due</span><b>{money(balance)}</b></div> : <div className="invoice-settled-row"><span>Nothing more is due</span><b>Paid in full</b></div>)}
         </div>
         <p className="quote-words">{numberWords(totals.grandTotal)}</p>
       </section>
@@ -289,10 +300,14 @@ function InvoiceEditor({ invoice, close, persist, duplicate, flash }: { invoice:
         </div>
       </details>
 
-      {doc.payments.length > 0 && <section className="quote-document-section invoice-block">
-        <div className="quote-section-title"><div><h2>Money received</h2><span>Every payment recorded against this invoice.</span></div></div>
-        <div className="invoice-payments">{doc.payments.map((payment) => <div key={payment.id}><b>{money(payment.amount)}</b><span>{prettyDate(payment.date)} · {payment.mode}{payment.reference ? ` · ${payment.reference}` : ""}</span>{payment.tds > 0 && <em>TDS {money(payment.tds)}</em>}</div>)}</div>
-      </section>}
+      {(() => { const applied = customerReceipts.filter((receipt) => receipt.status === "Posted" && receipt.allocations.some((allocation) => allocation.invoiceId === doc.id));
+        const tdsEntries = customerTds.filter((entry) => entry.invoiceId === doc.id);
+        if (!applied.length && !tdsEntries.length) return null;
+        return <section className="quote-document-section invoice-block">
+          <div className="quote-section-title"><div><h2>Money received</h2><span>Every receipt and TDS entry recorded against this invoice.</span></div></div>
+          <div className="invoice-payments">{applied.map((receipt) => { const allocation = receipt.allocations.find((entry) => entry.invoiceId === doc.id)!; return <div key={receipt.id}><b>{money(allocation.amount)}</b><span>{prettyDate(receipt.date)} · {receipt.mode}{receipt.reference ? ` · ${receipt.reference}` : ""}{receipt.clearance === "Pending Clearance" ? " · Pending clearance" : ""}</span></div>; })}
+          {tdsEntries.map((entry) => <div key={entry.id}><b>TDS {money(entry.amount)}</b><span>{prettyDate(entry.date)} · {entry.status === "Reversed" ? "Reversed" : entry.verification}{entry.reference ? ` · ${entry.reference}` : ""}</span></div>)}</div>
+        </section>; })()}
 
       <section className="quote-document-section invoice-block">
         <div className="quote-section-title"><div><h2>History</h2><span>What has happened to this invoice.</span></div></div>
@@ -300,35 +315,13 @@ function InvoiceEditor({ invoice, close, persist, duplicate, flash }: { invoice:
       </section>
     </main>
 
-    {collecting && <div className="invoice-mobile-bar"><button className="erp-action" onClick={() => setPaying(true)}>Record payment</button><button className="settings-outline" onClick={() => flash("WhatsApp message ready to share")}>Share on WhatsApp</button></div>}
+    {collecting && <div className="invoice-mobile-bar"><button className="erp-action" onClick={() => setPaying(true)}>Record Receipt</button><button className="settings-outline" onClick={() => flash("WhatsApp message ready to share")}>Share on WhatsApp</button></div>}
 
-    {paying && <RecordPayment balance={balance} close={() => setPaying(false)} save={addPayment} />}
+    {paying && <RecordReceipt store={store} customer={doc.customer} presetInvoiceId={doc.id} close={() => setPaying(false)} flash={flash} />}
     {preview && <InvoicePreview invoice={doc} totals={totals} localTax={localTax} close={() => setPreview(false)} />}
   </section>;
 }
 
-function RecordPayment({ balance, close, save }: { balance: number; close: () => void; save: (payment: Payment) => void }) {
-  const [date, setDate] = useState(dateIso()); const [amount, setAmount] = useState(String(balance));
-  const [mode, setMode] = useState<PaymentMode>("Bank"); const [reference, setReference] = useState("");
-  const [hasTds, setHasTds] = useState(false); const [tds, setTds] = useState("");
-  const value = Number(amount) || 0; const tdsValue = hasTds ? Number(tds) || 0 : 0;
-  const submit = () => { if (value <= 0) return; save({ id: `pay-${Date.now()}`, date, amount: value, mode, reference, tds: tdsValue }); };
-
-  return <div className="stock-modal-backdrop" onClick={close}><section className="stock-move-modal invoice-payment-modal" role="dialog" aria-modal="true" aria-labelledby="record-payment-title" onClick={(event) => event.stopPropagation()}>
-    <button className="stock-modal-close" onClick={close} aria-label="Close">×</button>
-    <h2 id="record-payment-title">Record a payment</h2>
-    <p className="invoice-start-hint">Money still due: <b>{money(balance)}</b>. Part payments are fine.</p>
-    <div className="invoice-payment-grid">
-      <label><span>Date received</span><input type="date" value={date} onChange={(event) => setDate(event.target.value)} /></label>
-      <label><span>Amount received</span><input type="number" min="0" value={amount} onChange={(event) => setAmount(event.target.value)} /></label>
-      <label><span>How was it paid?</span><select value={mode} onChange={(event) => setMode(event.target.value as PaymentMode)}><option>Bank</option><option>UPI</option><option>Cheque</option><option>Cash</option></select></label>
-      <label><span>Reference number</span><input value={reference} onChange={(event) => setReference(event.target.value)} placeholder="UTR, cheque or UPI number" /></label>
-    </div>
-    <label className="invoice-tds-check"><input type="checkbox" checked={hasTds} onChange={(event) => setHasTds(event.target.checked)} /><span>The customer deducted TDS</span></label>
-    {hasTds && <label className="invoice-tds-field"><span>TDS amount deducted</span><input type="number" min="0" value={tds} onChange={(event) => setTds(event.target.value)} placeholder="0" /></label>}
-    <div className="invoice-payment-footer"><span>Recording {money(value + tdsValue)}</span><div><button className="settings-outline" onClick={close}>Cancel</button><button className="erp-action" onClick={submit} disabled={value <= 0}>Save payment</button></div></div>
-  </section></div>;
-}
 
 function InvoicePreview({ invoice, totals, localTax, close }: { invoice: Invoice; totals: ReturnType<typeof totalsFor>; localTax: boolean; close: () => void }) {
   return <div className="stock-modal-backdrop quote-preview-backdrop"><section className="quote-preview" role="dialog" aria-modal="true" aria-labelledby="invoice-preview-title">

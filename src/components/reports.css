@@ -1,0 +1,51 @@
+/* Reports — one page, a compact selector, and nine read-only reports. */
+.reports-layout { display: grid; grid-template-columns: 210px minmax(0, 1fr); gap: 24px; align-items: start; margin-top: 8px; }
+.reports-nav { position: sticky; top: 12px; display: grid; gap: 18px; }
+.reports-nav-group { display: grid; gap: 2px; }
+.reports-nav-label { margin-bottom: 4px; color: #8a98a3; font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: .04em; }
+.reports-nav-group button { display: block; width: 100%; border-radius: 6px; padding: 8px 10px; color: #536678; font-size: 13px; font-weight: 600; text-align: left; }
+.reports-nav-group button:hover { background: #f1f6f8; color: #2c4459; }
+.reports-nav-group button.is-active { background: #eaf8fd; color: #136d90; }
+.reports-panel { min-width: 0; }
+.reports-description { margin: 0 0 16px; color: #536678; font-size: 13px; }
+
+.reports-mini-stats { display: flex; flex-wrap: wrap; gap: 22px; margin: 0 0 12px; }
+.reports-mini-stats span { color: #7b8894; font-size: 12px; font-weight: 600; }
+.reports-mini-stats b { margin-left: 6px; color: #2c4459; font-size: 15px; font-variant-numeric: tabular-nums; }
+.reports-figure--overdue { color: #ad4f5d; }
+.reports-figure--in { color: #2e7d4c; }
+.reports-figure--out { color: #ad4f5d; }
+.reports-note { margin: 0 0 14px; color: #667987; font-size: 12px; line-height: 1.5; }
+.reports-pending-chip { display: block; margin-top: 2px; color: #a0701f; font-size: 10px; font-weight: 700; }
+
+.reports-filters { margin-bottom: 10px; }
+/* .erp-filters forces its label children (and their span) to block-stack for column-style
+   fields; a checkbox+text pair needs to stay in one row instead. */
+.reports-filters .settings-check { flex: none !important; flex-direction: row !important; align-items: center !important; white-space: nowrap; }
+.reports-filters .settings-check > span { display: inline !important; white-space: nowrap; }
+.reports-toolbar { margin-bottom: 12px; }
+.reports-view-toggle { display: inline-flex; overflow: hidden; margin-bottom: 14px; border: 1px solid #dce5ea; border-radius: 8px; background: #fff; }
+.reports-view-toggle button { padding: 0 14px; height: 38px; color: #62737f; font-size: 12px; font-weight: 700; white-space: nowrap; }
+.reports-view-toggle button.is-active { background: #eaf8fd; color: #136d90; }
+
+.reports-print-header { display: none; }
+
+@media (max-width: 900px) {
+  .reports-layout { grid-template-columns: 1fr; }
+  .reports-nav { position: static; grid-auto-flow: column; overflow-x: auto; }
+}
+
+@media print {
+  .erp-sidebar, .erp-topbar, .reports-nav, .reports-filters, .reports-toolbar, .reports-view-toggle, .erp-pagination, .settings-toast { display: none !important; }
+  .reports-print-header { display: block !important; margin-bottom: 14px; }
+  .reports-print-header h2 { margin: 0; font-size: 16px; }
+  .reports-print-header h3 { margin: 2px 0; font-size: 14px; }
+  .reports-print-header p { margin: 2px 0; color: #444; font-size: 11px; }
+  .erp-main, .erp-content { margin: 0 !important; padding: 0 !important; }
+  .reports-layout { display: block; }
+  .erp-table-shell { overflow: visible !important; border: 0; }
+  .erp-data-table { width: 100%; }
+  .erp-data-table thead { display: table-header-group; }
+  .erp-data-table tr { break-inside: avoid; }
+  body { background: #fff !important; }
+}

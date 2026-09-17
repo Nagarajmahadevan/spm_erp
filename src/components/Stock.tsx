@@ -28,7 +28,7 @@ function actionsFor(item: StockItem): ActionKey[] {
   return ["issue-engineer", "transfer", "usage", "sale", "receive-return", "adjust"];
 }
 
-export default function Stock({ isEngineer = false }: { isEngineer?: boolean }) {
+export default function Stock({ isEngineer = false, focusItem }: { isEngineer?: boolean; focusItem?: string }) {
   const [tab, setTab] = useState<"equipment" | "spares">("equipment");
   const [query, setQuery] = useState("");
   const [holderFilter, setHolderFilter] = useState("All");
@@ -40,7 +40,7 @@ export default function Stock({ isEngineer = false }: { isEngineer?: boolean }) 
   const clearFilters = () => { setQuery(""); setHolderFilter("All"); setStatusFilter("All statuses"); setAlertFilter("All"); setDueSoon(false); };
   const { individuals, quantities, orders, moves, jobs } = useErpStore();
   const [acting, setActing] = useState<{ item: StockItem; action: ActionKey } | null>(null);
-  const [detail, setDetail] = useState<StockItem | null>(null);
+  const [detail, setDetail] = useState<StockItem | null>(() => focusItem ? [...individuals, ...quantities].find((item) => item.id === focusItem) ?? null : null);
   const [receiving, setReceiving] = useState(false);
   const [toast, setToast] = useState("");
   const flash = (message: string) => { setToast(message); window.setTimeout(() => setToast(""), 3200); };
