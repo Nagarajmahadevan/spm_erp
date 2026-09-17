@@ -5,4 +5,4 @@ import LoginScreen from "./components/LoginScreen";
 export const router = createBrowserRouter([
   { path: "/", Component: Dashboard },
   { path: "/login", Component: LoginScreen },
-]);
+], { basename: import.meta.env.BASE_URL });
