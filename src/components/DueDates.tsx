@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { ALERT_SETTINGS, APPROVER, CAL_LAB, ENGINEER, WAREHOUSE, dateIso, dayDifference, money, prettyDate, stamp } from "./erpMasters";
 import { COMPANY, JOB_SETTINGS, siteById, totalsFor, vendorMaster } from "./erpMasters";
 import { balanceOf, invoiceTotals, nextDueFor, openJobFor, paidSoFar, statutoryDues, updateStore, useErpStore, type Job, type Payment, type PaymentRecord, type StockMove } from "./erpStore";
+import { Overlay, Pagination, useTablePage } from "./ErpUi";
 
 type DueType = "Service" | "Master" | "Fleet" | "Payment" | "VendorBill" | "Bill" | "Statutory";
 type DueTab = "service" | "equipment" | "money";
@@ -129,6 +130,9 @@ function primaryLabel(item: DueItem) {
   return "Mark paid";
 }
 
+type Store = ReturnType<typeof useErpStore>;
+type SnoozeCtx = { today: string; snoozeFor: string | null; setSnoozeFor: (id: string | null) => void; snooze: (item: DueItem, days: number) => void };
+
 export default function DueDates({ isEngineer = false }: { isEngineer?: boolean }) {
   const store = useErpStore();
   const [tab, setTab] = useState<DueTab>("service");
@@ -176,6 +180,7 @@ export default function DueDates({ isEngineer = false }: { isEngineer?: boolean 
     setSnoozeFor(null);
     flash(`Hidden until ${prettyDate(addDays(today, days))}.`);
   };
+  const snoozeCtx: SnoozeCtx = { today, snoozeFor, setSnoozeFor, snooze };
   // One trip, one engineer, several instruments — travel is the real cost.
   const clusterJob = (chosen: DueItem[]) => {
     const instruments = store.instruments.filter((entry) => chosen.some((item) => item.recordId === entry.id));
@@ -197,58 +202,13 @@ export default function DueDates({ isEngineer = false }: { isEngineer?: boolean 
   };
 
   const remind = (item: DueItem) => flash(`${ALERT_SETTINGS.template[item.type]} sent to ${item.party} by ${ALERT_SETTINGS.channel[item.type]}.`);
-
-  const renderRow = (item: DueItem) => {
-    const when = whenLabel(item.date);
-    const snoozedTill = store.snoozed[item.id];
-    const master = item.type === "Master" ? store.masters.find((entry) => entry.id === item.recordId) : undefined;
-    const late = dayDifference(item.date) < 0;
-    return <article key={item.id} className={`due-row due-row--${item.type.toLowerCase()}${snoozedTill > today ? " is-snoozed" : ""}${item.type === "Master" && late ? " is-critical" : ""}`}>
-      <div className="due-row-main">
-        {isService && <input className="due-tick" type="checkbox" checked={picked.includes(item.id)} onChange={(event) => setPicked((all) => event.target.checked ? [...all, item.id] : all.filter((id) => id !== item.id))} aria-label={`Select ${item.title}`} />}
-        <button className="due-row-open" onClick={() => setOpening(item)}>{item.title}</button>
-        <button className="erp-action" onClick={() => setActing(item)}>{master?.sentOut ? "Record return" : primaryLabel(item)}</button>
-      </div>
-      <div className="due-row-meta">
-        <span className={`due-when due-when--${when.tone}`}>{when.text}</span>
-        <span>{prettyDate(item.date)}</span>
-        {item.site && <span className="due-site">{item.site} · {item.city}</span>}
-        {item.job ? <span className="due-job-chip">{item.job.number} · {item.job.status.toLowerCase()}{item.job.engineer ? ` · ${item.job.engineer}` : ""}</span> : item.type === "Service" ? <span className="due-nojob">No job yet</span> : null}
-        {item.type === "Master" && <span className={`due-depends${late ? " is-critical" : ""}`}>{item.dependents} instrument{item.dependents === 1 ? "" : "s"} depend on it</span>}
-        {master?.sentOut && <span className="due-sentout">At {master.sentOut.lab} · back {prettyDate(master.sentOut.expectedReturn)}</span>}
-        {item.type === "Payment" ? <>
-          <span>{item.party}</span>
-          <span className="due-money-cell">Invoice <b>{money(item.amount ?? 0)}</b></span>
-          <span className="due-money-cell">Received <b>{money(item.received ?? 0)}</b></span>
-          <span className="due-money-cell is-balance">Still due <b>{money(item.balance ?? 0)}</b></span>
-          <span className={item.lastReminder ? "due-reminded" : "due-never-reminded"}>{item.lastReminder ? `Reminded ${prettyDate(item.lastReminder)}` : "Never reminded"}</span>
-        </> : <>
-          {item.party && !item.site && item.type !== "Master" && <span>{item.party}</span>}
-          {item.amount ? <b className="due-amount">{money(item.amount)}</b> : null}
-        </>}
-        {item.note && item.type !== "Payment" && <span className={item.type === "Statutory" ? "due-penalty" : ""}>{item.note}</span>}
-        <span className="due-owner">{item.owner}</span>
-        {snoozedTill > today && <span className="due-snoozed-chip">Snoozed to {prettyDate(snoozedTill)}</span>}
-        <span className="due-row-links">
-          <span className="quote-action-anchor">
-            <button onClick={() => setSnoozeFor(snoozeFor === item.id ? null : item.id)}>Snooze</button>
-            {snoozeFor === item.id && <div className="quote-overflow-menu due-snooze-menu">
-              <button onClick={() => snooze(item, 1)}>1 day</button>
-              <button onClick={() => snooze(item, 7)}>1 week</button>
-              <label><span>Until</span><input type="date" min={today} onChange={(event) => event.target.value && snooze(item, dayDifference(event.target.value))} /></label>
-            </div>}
-          </span>
-          {item.type === "Payment" && <button onClick={() => remind(item)}>Send reminder</button>}
-          {item.type === "Service" && item.party && <button onClick={() => remind(item)}>Remind customer</button>}
-        </span>
-      </div>
-    </article>;
-  };
+  const clear = () => { setSearch(""); setWindow("all"); };
+  const active = Boolean(search || window_ !== "all");
 
   return <section className="leads-page due-page">
     <div className="leads-heading"><div><p className="erp-secondary-text">Operations / Due Dates</p><h1>Due Dates</h1><p className="erp-secondary-text mt-1">Everything that needs doing today, with the one button that does it.</p></div></div>
 
-    <div className="quotations-overview">{cards.map(([label, value, hint, tone, target]) => <button key={label} className={`leads-stat quotations-stat due-stat--${tone} ${window_ === target ? "is-active" : ""}`} onClick={() => setWindow(window_ === target ? "all" : target)}><span>{label}</span><b>{value}</b><small>{hint}</small></button>)}</div>
+    <div className="erp-summary-strip due-summary">{cards.map(([label, value, hint, tone, target]) => <button key={label} className={`leads-stat due-stat--${tone}${window_ === target ? " is-active" : ""}`} onClick={() => setWindow(window_ === target ? "all" : target)}><span>{label}</span><b>{value}</b><small>{hint}</small></button>)}</div>
 
     {!isEngineer && <div className="stock-tabs due-tabs">
       <button className={isService ? "is-active" : ""} onClick={() => { setTab("service"); setPicked([]); }}>Customer service due <span>{scoped.filter((item) => TAB_OF[item.type] === "service").length}</span></button>
@@ -256,7 +216,7 @@ export default function DueDates({ isEngineer = false }: { isEngineer?: boolean 
       <button className={activeTab === "money" ? "is-active" : ""} onClick={() => { setTab("money"); setPicked([]); }}>Money <span>{scoped.filter((item) => TAB_OF[item.type] === "money").length}</span></button>
     </div>}
 
-    <div className="due-toolbar"><div className="settings-list-search"><span>⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search what's due" /></div></div>
+    <div className="erp-filters due-filters"><label className="erp-search-filter"><span>Search what&apos;s due</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Title, party or owner" /></label>{active && <button className="erp-record-link" onClick={clear}>Clear all</button>}{snoozedCount > 0 && <button className="due-snoozed-toggle" onClick={() => setShowSnoozed(!showSnoozed)}>{showSnoozed ? "Hide" : "Show"} {snoozedCount} snoozed item{snoozedCount === 1 ? "" : "s"}</button>}</div>
 
     {isService && picked.length > 0 && (() => {
       const chosen = rows.filter((item) => picked.includes(item.id));
@@ -268,8 +228,6 @@ export default function DueDates({ isEngineer = false }: { isEngineer?: boolean 
       </div>;
     })()}
 
-    {snoozedCount > 0 && <button className="due-snoozed-toggle" onClick={() => setShowSnoozed(!showSnoozed)}>{showSnoozed ? "Hide" : "Show"} {snoozedCount} snoozed item{snoozedCount === 1 ? "" : "s"}</button>}
-
     {GROUPS[activeTab].map((group) => {
       const groupRows = rows.filter((item) => GROUP_OF[item.type] === group.key);
       if (!groupRows.length && !group.alwaysShow) return null;
@@ -279,18 +237,103 @@ export default function DueDates({ isEngineer = false }: { isEngineer?: boolean 
           <div><h3>{group.title}</h3><p>{group.blurb}</p></div>
           {group.money ? <div className="due-group-total"><span>{group.totalLabel}</span><b>{money(total)}</b></div> : <span className="due-group-count">{groupRows.length}</span>}
         </div>
-        <div className="due-list">{groupRows.map((item) => renderRow(item))}
-          {!groupRows.length && <p className="due-group-empty">Nothing here.</p>}
-        </div>
+        {group.key === "service" && <ServiceTable rows={groupRows} open={setOpening} act={setActing} picked={picked} setPicked={setPicked} snoozeCtx={snoozeCtx} />}
+        {group.key === "fleet" && <FleetTable rows={groupRows} open={setOpening} act={setActing} snoozeCtx={snoozeCtx} />}
+        {group.key === "collect" && <CollectTable rows={groupRows} open={setOpening} act={setActing} snoozeCtx={snoozeCtx} remind={remind} />}
+        {group.key === "pay" && <PayTable rows={groupRows} open={setOpening} act={setActing} snoozeCtx={snoozeCtx} />}
       </section>;
     })}
     {!rows.length && <div className="settings-empty due-empty"><b>Nothing due. Everything is up to date.</b><p>{window_ === "all" && !search ? `New ${isService ? "customer instruments coming up for calibration" : activeTab === "equipment" ? "calibrations for our own kit" : "payments and bills"} appear here on their own.` : "Nothing matches these filters. Clear the search or pick another card."}</p></div>}
-
 
     {acting && <ActionSheet item={acting} store={store} close={() => setActing(null)} flash={flash} />}
     {opening && <RecordDrawer item={opening} store={store} close={() => setOpening(null)} />}
     {toast && <div className="settings-toast" role="status">✓ {toast}</div>}
   </section>;
+}
+
+/* ─── Shared bits: due badge and the action cell (primary button + snooze) ─── */
+function DueCell({ date }: { date: string }) {
+  const when = whenLabel(date);
+  return <><span className={`due-when due-when--${when.tone}`}>{when.text}</span><small>{prettyDate(date)}</small></>;
+}
+function SnoozeMenu({ item, snoozeCtx }: { item: DueItem; snoozeCtx: SnoozeCtx }) {
+  const { today, snoozeFor, setSnoozeFor, snooze } = snoozeCtx;
+  return <span className="quote-action-anchor">
+    <button className="settings-link" onClick={() => setSnoozeFor(snoozeFor === item.id ? null : item.id)}>Snooze</button>
+    {snoozeFor === item.id && <div className="quote-overflow-menu due-snooze-menu">
+      <button onClick={() => snooze(item, 1)}>1 day</button>
+      <button onClick={() => snooze(item, 7)}>1 week</button>
+      <label><span>Until</span><input type="date" min={today} onChange={(event) => event.target.value && snooze(item, dayDifference(event.target.value))} /></label>
+    </div>}
+  </span>;
+}
+function ActionCell({ item, act, snoozeCtx, extra }: { item: DueItem; act: (item: DueItem) => void; snoozeCtx: SnoozeCtx; extra?: React.ReactNode }) {
+  return <div className="due-actions-cell">
+    <button className="erp-action" onClick={() => act(item)}>{primaryLabel(item)}</button>
+    <SnoozeMenu item={item} snoozeCtx={snoozeCtx} />
+    {extra}
+  </div>;
+}
+function rowClass(item: DueItem, today: string, snoozed: Record<string, string>) {
+  const snoozedTill = snoozed[item.id];
+  return `${dayDifference(item.date) < 0 ? "is-late" : ""}${snoozedTill > today ? " is-snoozed" : ""}`.trim();
+}
+
+/* ─── Customer instruments due for calibration ─── */
+function ServiceTable({ rows, open, act, picked, setPicked, snoozeCtx }: { rows: DueItem[]; open: (item: DueItem) => void; act: (item: DueItem) => void; picked: string[]; setPicked: (updater: (all: string[]) => string[]) => void; snoozeCtx: SnoozeCtx }) {
+  const { pageRows, page, setPage } = useTablePage(rows, `service|${rows.length}`);
+  const allPicked = pageRows.length > 0 && pageRows.every((item) => picked.includes(item.id));
+  return <><div className="erp-table-shell"><table className="erp-data-table due-table"><colgroup><col style={{ width: 44 }} /><col style={{ width: "26%" }} /><col style={{ width: "18%" }} /><col style={{ width: "13%" }} /><col style={{ width: "17%" }} /><col style={{ width: "9%" }} /><col style={{ width: "17%" }} /></colgroup><thead><tr>
+    <th className="ci-selection-cell"><input type="checkbox" checked={allPicked} ref={(node) => { if (node) node.indeterminate = !allPicked && pageRows.some((item) => picked.includes(item.id)); }} onChange={(event) => setPicked((all) => event.target.checked ? [...new Set([...all, ...pageRows.map((item) => item.id)])] : all.filter((id) => !pageRows.some((item) => item.id === id)))} aria-label="Select instruments on this page" /></th>
+    <th>Instrument</th><th>Customer &amp; Site</th><th>Due</th><th>Current Job</th><th>Owner</th><th>Action</th>
+  </tr></thead><tbody>{pageRows.map((item) => <tr key={item.id} className={rowClass(item, snoozeCtx.today, {})}>
+    <td className="ci-selection-cell"><input type="checkbox" checked={picked.includes(item.id)} onChange={(event) => setPicked((all) => event.target.checked ? [...all, item.id] : all.filter((id) => id !== item.id))} aria-label={`Select ${item.title}`} /></td>
+    <td><button className="erp-record-link" onClick={() => open(item)}>{item.title}</button></td>
+    <td><span>{item.party}</span>{item.site && <small>{item.site} · {item.city}</small>}</td>
+    <td><DueCell date={item.date} /></td>
+    <td>{item.job ? <span className="due-job-chip">{item.job.number} · {item.job.status.toLowerCase()}{item.job.engineer ? ` · ${item.job.engineer}` : ""}</span> : <span className="due-nojob">No job yet</span>}</td>
+    <td>{item.owner}</td>
+    <td><ActionCell item={item} act={act} snoozeCtx={snoozeCtx} extra={<button className="settings-link" onClick={() => act(item)}>Remind customer</button>} /></td>
+  </tr>)}</tbody></table>{!rows.length && <p className="due-group-empty">Nothing here.</p>}</div><Pagination total={rows.length} page={page} onPage={setPage} /></>;
+}
+
+/* ─── Our own equipment: calibration or rental return ─── */
+function FleetTable({ rows, open, act, snoozeCtx }: { rows: DueItem[]; open: (item: DueItem) => void; act: (item: DueItem) => void; snoozeCtx: SnoozeCtx }) {
+  const { pageRows, page, setPage } = useTablePage(rows, `fleet|${rows.length}`);
+  return <><div className="erp-table-shell"><table className="erp-data-table due-table"><colgroup><col style={{ width: "30%" }} /><col style={{ width: "22%" }} /><col style={{ width: "18%" }} /><col style={{ width: "12%" }} /><col style={{ width: "18%" }} /></colgroup><thead><tr><th>Equipment</th><th>Currently With</th><th>Due</th><th>Owner</th><th>Action</th></tr></thead><tbody>{pageRows.map((item) => <tr key={item.id} className={rowClass(item, snoozeCtx.today, {})}>
+    <td><button className="erp-record-link" onClick={() => open(item)}>{item.title}</button></td>
+    <td>{item.party ?? <span className="erp-muted">In store</span>}</td>
+    <td><DueCell date={item.date} /></td>
+    <td>{item.owner}</td>
+    <td><ActionCell item={item} act={act} snoozeCtx={snoozeCtx} /></td>
+  </tr>)}</tbody></table>{!rows.length && <p className="due-group-empty">Nothing here.</p>}</div><Pagination total={rows.length} page={page} onPage={setPage} /></>;
+}
+
+/* ─── Money — customer invoices still outstanding ─── */
+function CollectTable({ rows, open, act, snoozeCtx, remind }: { rows: DueItem[]; open: (item: DueItem) => void; act: (item: DueItem) => void; snoozeCtx: SnoozeCtx; remind: (item: DueItem) => void }) {
+  const { pageRows, page, setPage } = useTablePage(rows, `collect|${rows.length}`);
+  return <><div className="erp-table-shell"><table className="erp-data-table due-table"><colgroup><col style={{ width: "20%" }} /><col style={{ width: "16%" }} /><col style={{ width: "12%" }} /><col style={{ width: "12%" }} /><col style={{ width: "12%" }} /><col style={{ width: "13%" }} /><col style={{ width: "15%" }} /></colgroup><thead><tr><th>Invoice</th><th>Customer</th><th className="number">Invoice</th><th className="number">Received</th><th className="number">Balance</th><th>Reminder</th><th>Action</th></tr></thead><tbody>{pageRows.map((item) => <tr key={item.id} className={rowClass(item, snoozeCtx.today, {})}>
+    <td><button className="erp-record-link" onClick={() => open(item)}>{item.title}</button><DueCell date={item.date} /></td>
+    <td>{item.party}</td>
+    <td className="number">{money(item.amount ?? 0)}</td>
+    <td className="number">{money(item.received ?? 0)}</td>
+    <td className="number"><b>{money(item.balance ?? 0)}</b></td>
+    <td><span className={item.lastReminder ? "due-reminded" : "due-never-reminded"}>{item.lastReminder ? `Reminded ${prettyDate(item.lastReminder)}` : "Never reminded"}</span></td>
+    <td><ActionCell item={item} act={act} snoozeCtx={snoozeCtx} extra={<button className="settings-link" onClick={() => remind(item)}>Send reminder</button>} /></td>
+  </tr>)}</tbody></table>{!rows.length && <p className="due-group-empty">Nothing here.</p>}</div><Pagination total={rows.length} page={page} onPage={setPage} /></>;
+}
+
+/* ─── Money — vendor bills, company bills and statutory dues ─── */
+function PayTable({ rows, open, act, snoozeCtx }: { rows: DueItem[]; open: (item: DueItem) => void; act: (item: DueItem) => void; snoozeCtx: SnoozeCtx }) {
+  const { pageRows, page, setPage } = useTablePage(rows, `pay|${rows.length}`);
+  return <><div className="erp-table-shell"><table className="erp-data-table due-table"><colgroup><col style={{ width: "27%" }} /><col style={{ width: "16%" }} /><col style={{ width: "12%" }} /><col style={{ width: "14%" }} /><col style={{ width: "14%" }} /><col style={{ width: "17%" }} /></colgroup><thead><tr><th>Item</th><th>Party</th><th className="number">Amount</th><th>Due</th><th>Owner</th><th>Action</th></tr></thead><tbody>{pageRows.map((item) => <tr key={item.id} className={rowClass(item, snoozeCtx.today, {})}>
+    <td><button className="erp-record-link" onClick={() => open(item)}>{item.title}</button>{item.note && <small className={item.type === "Statutory" ? "due-penalty" : ""}>{item.note}</small>}</td>
+    <td>{item.party}</td>
+    <td className="number">{money(item.amount ?? 0)}</td>
+    <td><DueCell date={item.date} /></td>
+    <td>{item.owner}</td>
+    <td><ActionCell item={item} act={act} snoozeCtx={snoozeCtx} /></td>
+  </tr>)}</tbody></table>{!rows.length && <p className="due-group-empty">Nothing here.</p>}</div><Pagination total={rows.length} page={page} onPage={setPage} /></>;
 }
 
 function ActionSheet({ item, store, close, flash }: { item: DueItem; store: ReturnType<typeof useErpStore>; close: () => void; flash: (message: string) => void }) {
@@ -482,11 +525,11 @@ function ActionSheet({ item, store, close, flash }: { item: DueItem; store: Retu
     </>;
   };
 
-  return <div className="stock-modal-backdrop" onClick={close}><section className="stock-move-modal due-action-modal" role="dialog" aria-modal="true" aria-labelledby="due-action-title" onClick={(event) => event.stopPropagation()}>
+  return <Overlay onClose={close} label={primaryLabel(item)}><section className="stock-move-modal due-action-modal">
     <button className="stock-modal-close" onClick={close} aria-label="Close">×</button>
-    <h2 id="due-action-title">{primaryLabel(item)}</h2>
+    <h2>{primaryLabel(item)}</h2>
     {body()}
-  </section></div>;
+  </section></Overlay>;
 }
 
 function RecordDrawer({ item, store, close }: { item: DueItem; store: ReturnType<typeof useErpStore>; close: () => void }) {
@@ -497,7 +540,7 @@ function RecordDrawer({ item, store, close }: { item: DueItem; store: ReturnType
   const moves = store.moves.filter((entry) => entry.item === unit?.name);
   const site = siteById(instrument?.siteId ?? "");
 
-  return <div className="stock-modal-backdrop" onClick={close}><aside className="stock-detail due-drawer" onClick={(event) => event.stopPropagation()}>
+  return <Overlay onClose={close} label={instrument?.name ?? unit?.name ?? invoice?.number ?? bill?.name ?? item.title}><aside className="stock-detail due-drawer">
     <div className="settings-drawer-head">
       <div><p>{item.recordKind === "instrument" ? "Customer instrument" : item.recordKind === "equipment" ? "Our equipment" : item.recordKind === "invoice" ? "Invoice" : "Company bill"}</p><h2>{instrument?.name ?? unit?.name ?? invoice?.number ?? bill?.name}</h2></div>
       <button onClick={close} aria-label="Close">×</button>
@@ -541,7 +584,7 @@ function RecordDrawer({ item, store, close }: { item: DueItem; store: ReturnType
       <div><dt>How often</dt><dd>{bill.every}</dd></div>
       <div><dt>Who looks after it</dt><dd>{bill.owner}</dd></div>
     </dl>}
-  </aside></div>;
+  </aside></Overlay>;
 }
 
 /** Used by the shell for the sidebar badge and the dashboard panel. */

@@ -868,6 +868,11 @@ body {
 .due-money-cell.is-balance b { color: #ad4f5d; }
 .due-reminded { color: #62737f; font-size: 10px; font-weight: 700; }
 .due-never-reminded { border-radius: 99px; background: #fdf4e8; padding: 3px 9px; color: #8d6416; font-size: 10px; font-weight: 800; }
+.due-actions-cell { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.due-actions-cell .erp-action { min-height: 32px; padding: 0 12px; font-size: 11px; white-space: nowrap; }
+.due-actions-cell .settings-link { font-size: 11px; }
+.due-table tr.is-late td { background: #fffafa; }
+.due-table tr.is-snoozed { opacity: .6; }
 .master-blast { margin: 11px 0 0; border-left: 2px solid #d38b96; background: #fff7f8; padding: 9px 11px; color: #8f3f4c; font-size: 11px; font-weight: 700; line-height: 1.5; }
 
 /* Expired-master guardrails */
@@ -1008,18 +1013,21 @@ body {
 .erp-main { min-width: 0; }
 .erp-content { max-width: 1600px; padding: 26px 28px 40px; }
 .erp-content > section { min-width: 0; }
-.erp-table-shell { width: 100%; min-width: 0; overflow: auto; border: 1px solid #dce4ea; border-radius: 8px; background: #fff; }
+.erp-table-shell { width: 100%; min-width: 0; overflow: auto; border: 1px solid #dfe7eb; border-radius: 9px; background: #fff; }
 .erp-data-table { width: 100%; min-width: 0; table-layout: fixed; border-collapse: collapse; text-align: left; }
-.erp-data-table th, .erp-data-table td { width: auto; padding: 11px 12px; border-bottom: 1px solid #e7edf1; text-align: left; vertical-align: middle; white-space: normal; overflow-wrap: break-word; }
-.erp-data-table th { background: #f7f9fb; color: #526477; font-size: 12px; line-height: 1.4; font-weight: 700; }
-.erp-data-table td { color: #35485b; font-size: 14px; line-height: 1.45; }
-.erp-data-table td small { display: block; margin-top: 3px; color: #6a7988; font-size: 12px; line-height: 1.4; }
+.erp-data-table th, .erp-data-table td { width: auto; padding: 13px; border-bottom: 1px solid #edf1f3; text-align: left; vertical-align: middle; white-space: normal; overflow-wrap: break-word; }
+.erp-data-table th { background: #f8fafb; color: #82909d; font-size: 10px; line-height: 1.4; font-weight: 700; }
+.erp-data-table td { color: #5c6c7c; font-size: 12px; line-height: 1.45; }
+.erp-data-table td b { color: #334355; }
+.erp-data-table td small { display: block; margin-top: 3px; color: #83919d; font-size: 10px; line-height: 1.4; }
 .erp-data-table tbody tr:last-child td { border-bottom: 0; }
-.erp-data-table tbody tr:hover { background: #f6f9fb; }
+.erp-data-table tbody tr:hover { background: #f3fafc; }
 .erp-data-table tbody tr.is-selected, .erp-data-table tbody tr[aria-selected="true"] { background: #e6f4fc; box-shadow: inset 3px 0 #168fbe; }
 .erp-data-table .number { text-align: right; font-variant-numeric: tabular-nums; }
 .erp-data-table time, .erp-nowrap { white-space: nowrap; }
 .erp-data-table input[type="checkbox"] { display: block; width: 16px; height: 16px; margin: 0 auto; accent-color: #168fbe; }
+.erp-row-clickable { cursor: pointer; }
+.erp-row-clickable:focus-visible { outline: 2px solid #168fbe; outline-offset: -2px; }
 .erp-record-link { color: #127fa8; font-size: inherit; font-weight: 600; text-align: left; cursor: pointer; }
 .erp-record-link:hover { text-decoration: underline; text-underline-offset: 3px; }
 .erp-muted { color: #6a7988; font-size: 12px; line-height: 1.5; }
@@ -1032,7 +1040,7 @@ body {
 .erp-filter-summary { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 10px 0 14px; font-size: 12px; }
 .erp-filter-summary > span { padding: 4px 8px; background: #eaf2f7; border-radius: 5px; color: #456076; }
 .erp-summary-strip { display: flex; margin: 16px 0; border: 1px solid #dce4ea; border-radius: 8px; background: #fff; overflow: hidden; }
-.erp-summary-strip > button, .erp-summary-strip > div { flex: 1; min-width: 0; min-height: 68px; padding: 12px 16px; border: 0; border-right: 1px solid #e7edf1; border-radius: 0; box-shadow: none; background: transparent; text-align: left; }
+.erp-summary-strip > button, .erp-summary-strip > div { display: flex; flex: 1; flex-direction: column; align-items: flex-start; min-width: 0; min-height: 68px; padding: 12px 16px; border: 0; border-right: 1px solid #e7edf1; border-radius: 0; box-shadow: none; background: transparent; text-align: left; }
 .erp-summary-strip > :last-child { border-right: 0; }
 .erp-summary-strip > button:hover { background: #f4f9fc; }
 .erp-summary-strip span, .erp-summary-strip small { display: block; color: #637487; font-size: 12px; }

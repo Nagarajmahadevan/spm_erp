@@ -5,10 +5,7 @@
 .jobs-page .job-tabs { gap: 3px; flex-wrap: wrap; margin-bottom: 14px; }
 .jobs-page .job-tabs > button { padding: 8px 10px; font-size: 13px; }
 .jobs-page .erp-data-table { min-width: 0; }
-.jobs-page .erp-data-table th, .jobs-page .erp-data-table td { padding: 11px 9px; }
-.jobs-page .erp-data-table td { font-size: 14px; vertical-align: top; overflow-wrap: break-word; }
-.jobs-page .erp-data-table th { font-size: 12px; }
-.jobs-page .erp-data-table small { display: block; margin-top: 3px; font-size: 12px; line-height: 1.45; color: #697888; }
+.jobs-page .erp-data-table td { vertical-align: top; overflow-wrap: break-word; }
 .jobs-page .erp-data-table small.job-late { color: #a04e27; }
 .jobs-page .erp-data-table td > b { font-weight: 550; }
 .jobs-page .jobs-date { white-space: nowrap; font-size: 12px; }
@@ -105,4 +102,4 @@
 .jobs-free-slots > p { font-size: 13px; margin-bottom: 8px; }
 .jobs-free-slots button { margin: 6px 8px 6px 0; font-size: 13px; }
 .jobs-free-slots small { display: block; margin-top: 5px; color: #6d7e8b; font-size: 12px; }
-@media (max-width: 1000px) { .jobs-board .board-layout { grid-template-columns: 190px minmax(0, 1fr); } .jobs-page .erp-data-table td { font-size: 13px; } }
+@media (max-width: 1000px) { .jobs-board .board-layout { grid-template-columns: 190px minmax(0, 1fr); } }

@@ -95,8 +95,8 @@ export default function Stock({ isEngineer = false }: { isEngineer?: boolean }) 
     {activeFilters.length > 0 && <div className="erp-filter-summary">{activeFilters.map((filter) => <span key={String(filter)}>{filter}</span>)}<button className="erp-record-link" onClick={clearFilters}>Clear all</button></div>}
     {tab === "equipment" && counts.review > 0 && <p className="stock-review-note">{counts.review} operational item{counts.review === 1 ? "" : "s"} in store need{counts.review === 1 ? "s" : ""} calibration review before a calibration-dependent job. Issue restrictions await SPM confirmation.</p>}
     {tab === "equipment"
-      ? <><EquipmentTable items={equipmentPage.pageRows} open={setDetail} act={(item, action) => setActing({ item, action })} /><Pagination total={equipmentRows.length} page={equipmentPage.page} onPage={equipmentPage.setPage} /></>
-      : <><SpareTable items={sparePage.pageRows} orders={orders} open={setDetail} act={(item, action) => setActing({ item, action })} /><Pagination total={spareRows.length} page={sparePage.page} onPage={sparePage.setPage} /></>}
+      ? <><EquipmentTable items={equipmentPage.pageRows} open={setDetail} /><Pagination total={equipmentRows.length} page={equipmentPage.page} onPage={equipmentPage.setPage} /></>
+      : <><SpareTable items={sparePage.pageRows} orders={orders} open={setDetail} /><Pagination total={spareRows.length} page={sparePage.page} onPage={sparePage.setPage} /></>}
     {!(tab === "equipment" ? equipmentRows.length : spareRows.length) && <div className="settings-empty"><b>No matching stock items</b><p>Try a different search or clear the filters.</p><button className="settings-outline" onClick={clearFilters}>Clear filters</button></div>}
 
     {detail && <Detail item={detail} moves={moves} close={() => setDetail(null)} act={(action) => { setDetail(null); setActing({ item: detail, action }); }} />}
@@ -107,26 +107,21 @@ export default function Stock({ isEngineer = false }: { isEngineer?: boolean }) 
 }
 type Store2 = ReturnType<typeof useErpStore>;
 
-function ActionsMenu({ item, act }: { item: StockItem; act: (item: StockItem, action: ActionKey) => void }) {
-  return actionsFor(item).length ? <ActionMenu items={actionsFor(item).map((key) => ({ label: ACTION_LABEL[key], onSelect: () => act(item, key) }))} /> : null;
-}
-
-function EquipmentTable({ items, open, act }: { items: Individual[]; open: (item: Individual) => void; act: (item: StockItem, action: ActionKey) => void }) {
-  return <div className="erp-table-shell"><table className="erp-data-table stock-equipment-register"><colgroup><col style={{ width: 92 }} /><col /><col style={{ width: 124 }} /><col style={{ width: "16%" }} /><col style={{ width: 183 }} /><col style={{ width: 88 }} /></colgroup><thead><tr><th>Internal ID</th><th>Equipment</th><th>Operational status</th><th>Currently with</th><th>Due information</th><th>Actions</th></tr></thead><tbody>{items.map((item) => <tr key={item.id}>
-    <td><button className="erp-record-link erp-nowrap" onClick={() => open(item)}>{item.id}</button></td>
-    <td><button className="erp-record-link" onClick={() => open(item)}>{item.name}</button><small>{item.model}</small><small>{item.serial}</small></td>
+function EquipmentTable({ items, open }: { items: Individual[]; open: (item: Individual) => void }) {
+  return <div className="erp-table-shell"><table className="erp-data-table stock-equipment-register"><colgroup><col style={{ width: 92 }} /><col /><col style={{ width: 140 }} /><col style={{ width: "18%" }} /><col style={{ width: 200 }} /></colgroup><thead><tr><th>Internal ID</th><th>Equipment</th><th>Operational status</th><th>Currently with</th><th>Due information</th></tr></thead><tbody>{items.map((item) => <tr key={item.id} className="erp-row-clickable" onClick={() => open(item)}>
+    <td><b className="erp-nowrap">{item.id}</b></td>
+    <td><b>{item.name}</b><small>{item.model}</small><small>{item.serial}</small></td>
     <td><span className={`stock-status ${opClass(item.opStatus)}`}>{operationLabel(item)}</span></td>
     <td>{item.currentWith}</td>
     <td>{item.calibrationDue ? <div className={dayDifference(item.calibrationDue) < 0 ? "stock-due-info is-overdue" : "stock-due-info"}><span>Calibration: <time>{prettyDate(item.calibrationDue)}</time></span>{dayDifference(item.calibrationDue) < 0 && <small>Overdue · Needs review</small>}{dayDifference(item.calibrationDue) >= 0 && dayDifference(item.calibrationDue) <= 7 && <small>Due soon</small>}</div> : <small>Calibration not recorded</small>}{operationLabel(item) === "On rent" && <div className="stock-due-info"><span>Rental return: <time>{item.rentalReturnDue ? prettyDate(item.rentalReturnDue) : "Not set"}</time></span>{item.rentalReturnDue && dayDifference(item.rentalReturnDue) < 0 && <small>Overdue</small>}</div>}</td>
-    <td><ActionsMenu item={item} act={act} /></td>
   </tr>)}</tbody></table></div>;
 }
 
-function SpareTable({ items, orders, open, act }: { items: Quantity[]; orders: PurchaseOrder[]; open: (item: Quantity) => void; act: (item: StockItem, action: ActionKey) => void }) {
-  return <div className="erp-table-shell"><table className="erp-data-table stock-spares-register"><colgroup><col /><col style={{ width: 110 }} /><col style={{ width: 116 }} /><col style={{ width: 95 }} /><col style={{ width: 90 }} /><col style={{ width: 95 }} /><col style={{ width: 88 }} /></colgroup><thead><tr><th>Item / Stock code</th><th className="number">Total on hand</th><th className="number">Available in store</th><th className="number">Minimum level</th><th className="number">On order</th><th>Stock alert</th><th>Actions</th></tr></thead><tbody>{items.map((item) => { const total = totalOf(item); return <tr key={item.id}>
-    <td><button className="erp-record-link" onClick={() => open(item)}>{item.name}</button><small>{item.id} · {item.unit}</small></td>
+function SpareTable({ items, orders, open }: { items: Quantity[]; orders: PurchaseOrder[]; open: (item: Quantity) => void }) {
+  return <div className="erp-table-shell"><table className="erp-data-table stock-spares-register"><colgroup><col /><col style={{ width: 110 }} /><col style={{ width: 116 }} /><col style={{ width: 95 }} /><col style={{ width: 90 }} /><col style={{ width: 110 }} /></colgroup><thead><tr><th>Item / Stock code</th><th className="number">Total on hand</th><th className="number">Available in store</th><th className="number">Minimum level</th><th className="number">On order</th><th>Stock alert</th></tr></thead><tbody>{items.map((item) => { const total = totalOf(item); return <tr key={item.id} className="erp-row-clickable" onClick={() => open(item)}>
+    <td><b>{item.name}</b><small>{item.id} · {item.unit}</small></td>
     <td className="number">{total.toLocaleString("en-IN")}</td><td className="number">{storeQuantity(item).toLocaleString("en-IN")}</td><td className="number">{item.minimum.toLocaleString("en-IN")}</td><td className="number">{onOrderFor(item.id, orders).toLocaleString("en-IN")}</td>
-    <td>{total < item.minimum ? <span className="stock-status low">Low stock</span> : <span className="erp-muted">Within level</span>}</td><td><ActionsMenu item={item} act={act} /></td>
+    <td>{total < item.minimum ? <span className="stock-status low">Low stock</span> : <span className="erp-muted">Within level</span>}</td>
   </tr>; })}</tbody></table></div>;
 }
 

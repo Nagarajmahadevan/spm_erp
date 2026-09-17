@@ -12,7 +12,6 @@
 .attendance-result-line label { gap: 7px; white-space: nowrap; font-size: 12px; }
 .attendance-result-line select { height: 32px; padding: 0 8px; border: 1px solid #dce5ea; border-radius: 6px; background: #fff; color: #405365; font-size: 12px; }
 .attendance-page .erp-data-table td { vertical-align: middle; }
-.attendance-page .erp-data-table small { display: block; margin-top: 3px; color: #73818d; font-size: 12px; line-height: 1.4; }
 .attendance-page .attendance-status, .attendance-drawer .attendance-status { white-space: nowrap; font-size: 12px; font-weight: 600; }
 .attendance-nowrap { white-space: nowrap; font-variant-numeric: tabular-nums; }
 .attendance-status--training { background: #f2edfc; color: #7657a2; }
@@ -21,7 +20,7 @@
 .attendance-review-button { height: 31px; min-height: 31px; padding: 0 8px; font-size: 12px; }
 .attendance-clamp { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .attendance-overlay { display: block; padding: 0; }
-.attendance-drawer { z-index: 1; width: min(560px, 100vw); height: 100dvh; overflow: hidden; padding: 0; }
+.settings-drawer.attendance-drawer { z-index: 1; width: min(560px, 100vw); height: 100dvh; overflow: hidden; padding: 0; }
 .attendance-drawer > .settings-drawer-head { flex-shrink: 0; margin: 0; padding: 22px 24px 18px; border-bottom: 1px solid #e3eaee; }
 .attendance-drawer > .settings-drawer-head p { font-size: 12px; }
 .attendance-drawer-body { min-height: 0; flex: 1; overflow-y: auto; overscroll-behavior: contain; padding: 22px 24px; }
@@ -80,5 +79,5 @@
 .attendance-legend > span { display: flex; gap: 6px; align-items: center; }
 .attendance-legend b { font-size: 14px; }
 .attendance-legend-today { padding: 3px 7px; background: #edf8fc; border: 1px solid #d4eaf4; border-radius: 3px; }
-@media (max-width: 1100px) { .attendance-filters > label { min-width: 130px; } .attendance-page .erp-data-table { font-size: 13px; } .attendance-page .erp-data-table td, .attendance-page .erp-data-table th { padding-left: 10px; padding-right: 10px; } .attendance-page .attendance-status { font-size: 11px; padding-left: 6px; padding-right: 6px; } }
+@media (max-width: 1100px) { .attendance-filters > label { min-width: 130px; } .attendance-page .erp-data-table td, .attendance-page .erp-data-table th { padding-left: 10px; padding-right: 10px; } .attendance-page .attendance-status { font-size: 11px; padding-left: 6px; padding-right: 6px; } }
 @media (max-width: 700px) { .attendance-result-line { flex-wrap: wrap; } .attendance-form-grid { grid-template-columns: 1fr; } .attendance-modal { max-height: calc(100dvh - 32px); } }

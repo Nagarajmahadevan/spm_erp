@@ -726,12 +726,123 @@ export function visitsOn(jobs: Job[], date: string, nowIsoValue: string = nowIso
   return rows.sort((a, b) => timeToMinutes(a.plannedStart) - timeToMinutes(b.plannedStart));
 }
 
+// Advance & Expense — engineer cash advances, their expense claims and the settlement
+// payments against them. Deliberately separate from CompanyBill (office/company expenses):
+// these are person-linked claims, not vendor bills, and must never be conflated in Accounts.
+export type ExpenseCategory = "Travel" | "Food" | "Accommodation" | "Parking / Toll" | "Materials" | "Other";
+export type ExpenseStatus = "Draft" | "Pending Approval" | "Changes Requested" | "Approved" | "Rejected";
+export const EXPENSE_CATEGORIES: ExpenseCategory[] = ["Travel", "Food", "Accommodation", "Parking / Toll", "Materials", "Other"];
+export type ExpenseHistoryEntry = { action: string; at: string; by: string; reason?: string };
+export type Expense = {
+  id: string;
+  engineer: string;
+  submittedBy: string;
+  expenseDate: string;
+  category: ExpenseCategory;
+  amount: number;
+  description: string;
+  billFiles: string[];
+  billMissingReason?: string;
+  jobId?: string;
+  status: ExpenseStatus;
+  submittedAt?: string;
+  history: ExpenseHistoryEntry[];
+};
+
+export type PaymentKind = "Advance Paid" | "Reimbursement Paid" | "Money Returned";
+export type SettlementMode = "Cash" | "UPI" | "Bank Transfer";
+export type PaymentStatus2 = "Posted" | "Reversed";
+export type ExpensePayment = {
+  id: string;
+  engineer: string;
+  type: PaymentKind;
+  amount: number;
+  date: string;
+  mode: SettlementMode;
+  reference?: string;
+  jobId?: string;
+  notes?: string;
+  overrideReason?: string;
+  recordedBy: string;
+  recordedAt: string;
+  status: PaymentStatus2;
+  reversedReason?: string;
+  reversedBy?: string;
+  reversedAt?: string;
+};
+
+/** The one shared balance calculation. Positive = cash still with the engineer; negative =
+ *  SPM owes a reimbursement; zero = settled. Only *current* status counts — a reversed
+ *  payment or an expense moved off "Approved" simply stops contributing, so nothing needs a
+ *  separate "already applied" flag and nothing can be double-counted. */
+export function engineerBalance(expenses: Expense[], payments: ExpensePayment[], engineer: string) {
+  const posted = payments.filter((p) => p.engineer === engineer && p.status !== "Reversed");
+  const advancesPaid = posted.filter((p) => p.type === "Advance Paid").reduce((sum, p) => sum + p.amount, 0);
+  const reimbursementsPaid = posted.filter((p) => p.type === "Reimbursement Paid").reduce((sum, p) => sum + p.amount, 0);
+  const moneyReturned = posted.filter((p) => p.type === "Money Returned").reduce((sum, p) => sum + p.amount, 0);
+  const mine = expenses.filter((e) => e.engineer === engineer);
+  const approvedExpenses = mine.filter((e) => e.status === "Approved").reduce((sum, e) => sum + e.amount, 0);
+  const pendingClaims = mine.filter((e) => e.status === "Pending Approval" || e.status === "Changes Requested").reduce((sum, e) => sum + e.amount, 0);
+  const balance = Math.round((advancesPaid + reimbursementsPaid - moneyReturned - approvedExpenses) * 100) / 100;
+  return { advancesPaid, reimbursementsPaid, moneyReturned, approvedExpenses, pendingClaims, balance };
+}
+export function balanceStatus(balance: number, pendingClaims: number): "With engineer" | "To reimburse" | "Settled" | "Settled · claims pending" {
+  if (balance > 0.005) return "With engineer";
+  if (balance < -0.005) return "To reimburse";
+  return pendingClaims > 0 ? "Settled · claims pending" : "Settled";
+}
+/** Same engineer, same date, same amount — a legitimate coincidence can happen, so this is a
+ *  review warning, never an automatic block. */
+export function duplicateExpenses(expenses: Expense[], candidate: Pick<Expense, "id" | "engineer" | "expenseDate" | "amount">) {
+  return expenses.filter((e) => e.id !== candidate.id && e.engineer === candidate.engineer && e.expenseDate === candidate.expenseDate && e.amount === candidate.amount);
+}
+/** A reused transaction reference — flagged for review, not rejected, since references are
+ *  not guaranteed globally unique across modes/engineers. */
+export function duplicateReference(payments: ExpensePayment[], reference: string, excludeId?: string) {
+  if (!reference.trim()) return [];
+  return payments.filter((p) => p.id !== excludeId && p.status !== "Reversed" && p.reference?.trim().toLowerCase() === reference.trim().toLowerCase());
+}
+
 type Store = {
   individuals: Individual[]; quantities: Quantity[]; orders: PurchaseOrder[]; moves: StockMove[]; invoices: Invoice[];
   contracts: AmcContract[]; bills: CompanyBill[]; masters: Master[]; statutoryPaid: Record<string, PaymentRecord>;
   snoozed: Record<string, string>; instruments: CustomerInstrument[]; jobs: Job[];
   leaves: LeaveRequest[]; holidays: Holiday[]; attendance: AttendanceEvent[]; corrections: Correction[];
+  expenses: Expense[]; advancePayments: ExpensePayment[];
 };
+
+// ─── Advance & Expense actions ──────────────────────────────────────────────
+export function submitExpense(current: Store, expense: Expense): Partial<Store> {
+  return { expenses: [expense, ...current.expenses] };
+}
+export function reviewExpense(current: Store, expenseId: string, decision: "Approved" | "Rejected" | "Changes Requested", reviewer: string, reason?: string): Partial<Store> {
+  return { expenses: current.expenses.map((entry) => entry.id !== expenseId ? entry : {
+    ...entry, status: decision,
+    history: [...entry.history, { action: decision === "Changes Requested" ? "Sent back for changes" : decision, at: stamp(), by: reviewer, reason }],
+  }) };
+}
+/** Edits a Changes-Requested claim in place and puts it back in the approval queue — never a
+ *  new record, so its history and identity stay intact across correction rounds. */
+export function resubmitExpense(current: Store, expenseId: string, patch: Pick<Expense, "category" | "amount" | "description" | "billFiles" | "billMissingReason" | "jobId">): Partial<Store> {
+  return { expenses: current.expenses.map((entry) => entry.id !== expenseId ? entry : {
+    ...entry, ...patch, status: "Pending Approval" as const,
+    history: [...entry.history, { action: "Corrected and resubmitted", at: stamp(), by: entry.submittedBy }],
+  }) };
+}
+/** Reversing an approval moves the claim back to Changes Requested — it immediately stops
+ *  counting toward the balance (only "Approved" status counts) and re-enters the correction
+ *  flow rather than being silently edited or deleted. */
+export function reverseExpenseApproval(current: Store, expenseId: string, reviewer: string, reason: string): Partial<Store> {
+  return { expenses: current.expenses.map((entry) => entry.id !== expenseId || entry.status !== "Approved" ? entry : {
+    ...entry, status: "Changes Requested" as const,
+    history: [...entry.history, { action: "Approval reversed", at: stamp(), by: reviewer, reason }],
+  }) };
+}
+export function reversePayment(current: Store, paymentId: string, reviewer: string, reason: string): Partial<Store> {
+  return { advancePayments: current.advancePayments.map((entry) => entry.id !== paymentId || entry.status === "Reversed" ? entry : {
+    ...entry, status: "Reversed" as const, reversedReason: reason, reversedBy: reviewer, reversedAt: stamp(),
+  }) };
+}
 
 let state: Store = {
   individuals: [
@@ -857,6 +968,21 @@ let state: Store = {
     { id: "PO-24093", number: "PO-24093", vendor: "Optika Instruments", contact: "Farah Sheikh", vendorGstin: "24AABCO4455N1ZV", vendorState: "Gujarat", vendorAddress: "9, GIDC Vatva, Ahmedabad, Gujarat 382445", paymentTerms: "Net 45", tdsSection: "194Q", tdsRate: 0.1, orderDate: "2026-09-12", expectedDate: "2026-10-05", status: "Awaiting approval", owner: "Priya Shah", deliveryAddress: WAREHOUSE, freightCharges: 0, notes: "Quote confirmed over email on 11 Sep.", linkedQuote: "", items: [{ id: "po93-1", item: "Optical Microscope MX-5", description: "Optical microscope with 5 MP imaging", hsn: "9011", quantity: 2, rate: 168000, gst: 18, tracked: true, received: 0, serials: [] }], receipts: [], activities: [{ title: "Sent for approval — above ₹2,00,000", meta: "12 Sep 2026 · Priya Shah", tone: "system" }] },
     { id: "PO-24092", number: "PO-24092", vendor: "Nanotech Supplies", contact: "Divya Krishnan", vendorGstin: "33AAGCN7781K1ZP", vendorState: "Tamil Nadu", vendorAddress: "5, Ambattur Industrial Estate, Chennai, Tamil Nadu 600058", paymentTerms: "Net 15", tdsSection: "—", tdsRate: 0, orderDate: "2026-09-15", expectedDate: "2026-09-25", status: "Draft", owner: "Arun Kumar", deliveryAddress: WAREHOUSE, freightCharges: 0, notes: "", linkedQuote: "", items: [{ id: "po92-1", item: "O-ring set — 25 pack", description: "Nitrile O-ring assortment, 25 pack", hsn: "4016", quantity: 15, rate: 1450, gst: 18, received: 0, serials: [] }], receipts: [], activities: [{ title: "Draft created", meta: "15 Sep 2026 · Arun Kumar", tone: "system" }] },
     { id: "PO-24091", number: "PO-24091", vendor: "Precision Systems India", contact: "Vikram Joshi", vendorGstin: "27AACCP1234F1Z8", vendorState: "Maharashtra", vendorAddress: "Plot 22, Bhosari MIDC, Pune, Maharashtra 411026", paymentTerms: "Net 30", tdsSection: "194C", tdsRate: 1, orderDate: "2026-08-26", expectedDate: "2026-09-02", status: "Received", owner: "Priya Shah", deliveryAddress: WAREHOUSE, freightCharges: 0, notes: "", linkedQuote: "", items: [{ id: "po91-1", item: "Vacuum seal kit", description: "Vacuum seal maintenance kit", hsn: "8484", quantity: 20, rate: 9800, gst: 18, stockId: "SP-033", received: 20, serials: [] }], receipts: [{ id: "rc-0", date: "2026-09-02", location: WAREHOUSE, challan: "PSI/DC/8790", note: "", lines: [{ lineId: "po91-1", quantity: 20, serials: [] }] }], vendorBill: "PSI/INV/2026/551", sentAt: "26 Aug 2026", activities: [{ title: "All items received", meta: "02 Sep 2026 · Priya Shah", tone: "received" }, { title: "Sent to Precision Systems India", meta: "26 Aug 2026 · Priya Shah", tone: "sent" }] },
+  ],
+  expenses: [
+    { id: "EXP-001", engineer: "Nikhil Rao", submittedBy: "Nikhil Rao", expenseDate: "2026-09-12", category: "Travel", amount: 4500, description: "Cab fare and fuel for the Whitefield calibration visit.", billFiles: ["travel_receipt_0912.jpg"], jobId: "JOB-1041", status: "Approved", submittedAt: "12 Sep 2026 · 06:40 PM", history: [{ action: "Submitted", at: "12 Sep 2026 · 06:40 PM", by: "Nikhil Rao" }, { action: "Approved", at: "13 Sep 2026 · 10:05 AM", by: "Arun Kumar" }] },
+    { id: "EXP-002", engineer: "Nikhil Rao", submittedBy: "Nikhil Rao", expenseDate: "2026-09-16", category: "Food", amount: 300, description: "Lunch during the Biocon lab visit.", billFiles: ["food_bill_0916.jpg"], status: "Pending Approval", submittedAt: "16 Sep 2026 · 02:15 PM", history: [{ action: "Submitted", at: "16 Sep 2026 · 02:15 PM", by: "Nikhil Rao" }] },
+    { id: "EXP-003", engineer: "Sandeep Kulkarni", submittedBy: "Sandeep Kulkarni", expenseDate: "2026-09-14", category: "Parking / Toll", amount: 800, description: "Toll both ways, Pune–Bengaluru for the Aster Pharma rental delivery.", billFiles: ["toll_receipt.jpg"], jobId: "JOB-1038", status: "Approved", submittedAt: "14 Sep 2026 · 07:50 PM", history: [{ action: "Submitted", at: "14 Sep 2026 · 07:50 PM", by: "Sandeep Kulkarni" }, { action: "Approved", at: "15 Sep 2026 · 09:20 AM", by: "Arun Kumar" }] },
+    { id: "EXP-004", engineer: "Anitha Raj", submittedBy: "Anitha Raj", expenseDate: "2026-09-08", category: "Accommodation", amount: 2600, description: "One night stay for the two-day Tera Research visit.", billFiles: ["hotel_invoice.pdf"], status: "Approved", submittedAt: "09 Sep 2026 · 08:30 AM", history: [{ action: "Submitted", at: "09 Sep 2026 · 08:30 AM", by: "Anitha Raj" }, { action: "Approved", at: "09 Sep 2026 · 04:10 PM", by: "Arun Kumar" }] },
+    { id: "EXP-005", engineer: "Meera Iyer", submittedBy: "Meera Iyer", expenseDate: "2026-09-15", category: "Materials", amount: 450, description: "Cable ties and cleaning solvent bought locally for the site visit.", billFiles: [], billMissingReason: "Vendor is a small local hardware shop and did not issue a printed receipt; paid by UPI.", status: "Pending Approval", submittedAt: "15 Sep 2026 · 05:45 PM", history: [{ action: "Submitted", at: "15 Sep 2026 · 05:45 PM", by: "Meera Iyer" }] },
+    { id: "EXP-006", engineer: "Rahul Desai", submittedBy: "Rahul Desai", expenseDate: "2026-09-13", category: "Travel", amount: 1200, description: "Cab from the airport to the customer site.", billFiles: ["cab_receipt.jpg"], status: "Changes Requested", submittedAt: "13 Sep 2026 · 09:10 PM", history: [{ action: "Submitted", at: "13 Sep 2026 · 09:10 PM", by: "Rahul Desai" }, { action: "Sent back for changes", at: "14 Sep 2026 · 11:00 AM", by: "Priya Shah", reason: "₹1,200 looks high for an airport cab — please confirm the distance or attach a clearer receipt." }] },
+    { id: "EXP-007", engineer: "Kiran Joseph", submittedBy: "Kiran Joseph", expenseDate: "2026-09-16", category: "Food", amount: 550, description: "Team lunch with the customer's QA team.", billFiles: ["lunch_bill_a.jpg"], status: "Pending Approval", submittedAt: "16 Sep 2026 · 01:30 PM", history: [{ action: "Submitted", at: "16 Sep 2026 · 01:30 PM", by: "Kiran Joseph" }] },
+    { id: "EXP-008", engineer: "Kiran Joseph", submittedBy: "Kiran Joseph", expenseDate: "2026-09-16", category: "Food", amount: 550, description: "Lunch during the site visit.", billFiles: ["lunch_bill_b.jpg"], status: "Pending Approval", submittedAt: "16 Sep 2026 · 01:35 PM", history: [{ action: "Submitted", at: "16 Sep 2026 · 01:35 PM", by: "Kiran Joseph" }] },
+  ],
+  advancePayments: [
+    { id: "ADV-001", engineer: "Nikhil Rao", type: "Advance Paid", amount: 5000, date: "2026-09-10", mode: "Cash", jobId: undefined, notes: "Advance for the week's Whitefield and Biocon visits.", recordedBy: "Priya Shah", recordedAt: "10 Sep 2026 · 09:00 AM", status: "Posted" },
+    { id: "ADV-002", engineer: "Anitha Raj", type: "Advance Paid", amount: 2000, date: "2026-09-05", mode: "UPI", reference: "UPI/440210", notes: "Advance for the Tera Research trip.", recordedBy: "Priya Shah", recordedAt: "05 Sep 2026 · 10:15 AM", status: "Posted" },
+    { id: "ADV-003", engineer: "Sandeep Kulkarni", type: "Advance Paid", amount: 500, date: "2026-09-01", mode: "Cash", notes: "Recorded against the wrong engineer by mistake.", recordedBy: "Priya Shah", recordedAt: "01 Sep 2026 · 11:00 AM", status: "Reversed", reversedReason: "Advance was actually paid to Nikhil Rao, not Sandeep Kulkarni — recorded against the wrong person.", reversedBy: "Arun Kumar", reversedAt: "02 Sep 2026 · 09:30 AM" },
   ],
 };
 

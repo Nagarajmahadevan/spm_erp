@@ -1,0 +1,64 @@
+/* Advance & Expense — overview, expense review and payment recording. */
+.expense-page .job-tabs { margin-bottom: 14px; }
+.expense-summary { margin-bottom: 14px; }
+.expense-filters { margin-bottom: 10px; }
+.expense-filters .expense-search { flex: 1.6; }
+.expense-inline-actions { display: flex; align-items: center; gap: 12px; white-space: nowrap; }
+.expense-inline-actions label { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #62737f; }
+.expense-inline-actions select { padding: 5px 6px; border: 1px solid #dce4e9; border-radius: 5px; background: #fff; font-size: 12px; }
+
+.expense-balance { display: inline-flex; width: max-content; border-radius: 99px; padding: 3px 9px; font-size: 11px; font-weight: 700; white-space: nowrap; }
+.expense-balance--with-engineer { background: #eaf7ee; color: #2e7d4c; }
+.expense-balance--to-reimburse { background: #fff0f1; color: #ad4f5d; }
+.expense-balance--settled { background: #eef3f5; color: #5a6c78; }
+.expense-balance--settled-claims-pending { background: #fdf4e8; color: #a0701f; }
+
+.job-status--pending-approval { background: #fdf4e8; color: #a0701f; }
+.job-status--changes-requested { background: #f3effc; color: #7055a2; }
+.job-status--draft { background: #f0f2f4; color: #77848f; }
+
+.settings-drawer.expense-drawer { width: min(460px, 100vw); }
+.settings-drawer.expense-review-drawer { width: min(880px, 100vw); }
+.expense-drawer-actions { padding: 0 22px; margin-top: -6px; }
+.expense-drawer-body { flex: 1; overflow-y: auto; padding: 4px 22px 22px; }
+.expense-review-layout { display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 20px; align-items: start; }
+.expense-bill-pane h3 { margin: 0 0 10px; color: #37495a; font-size: 13px; font-weight: 800; }
+.expense-bill-files { display: grid; gap: 10px; }
+.expense-bill-files img { display: block; width: 100%; border: 1px solid #dce5e9; border-radius: 8px; object-fit: cover; }
+.expense-bill-mock { display: grid; gap: 4px; border: 1px dashed #d6e1e8; border-radius: 8px; padding: 14px 10px; text-align: center; color: #6a7988; }
+.expense-bill-mock span { font-size: 20px; }
+.expense-bill-mock small { font-size: 11px; font-weight: 700; color: #47606f; }
+.expense-bill-mock em { font-size: 9px; font-style: normal; color: #97a4ae; }
+.expense-detail-pane { min-width: 0; }
+.expense-breakdown { display: grid; gap: 6px; margin-top: 10px; }
+.expense-breakdown div { display: flex; align-items: center; justify-content: space-between; gap: 10px; border-bottom: 1px solid #edf1f3; padding-bottom: 5px; font-size: 12px; }
+.expense-breakdown dt { color: #6a7988; }
+.expense-breakdown dd { margin: 0; color: #35485b; font-weight: 700; font-variant-numeric: tabular-nums; }
+.expense-count { color: #62737f; font-weight: 700; }
+.expense-mini-list { display: grid; gap: 8px; }
+.expense-mini-list > div { border: 1px solid #e2e9ec; border-radius: 8px; background: #fbfdfe; padding: 9px 11px; }
+.expense-mini-list b { display: block; color: #3d5161; font-size: 12px; }
+.expense-mini-list span { display: block; margin-top: 2px; color: #7b8894; font-size: 11px; }
+.expense-mini-list small { display: block; margin-top: 3px; color: #8a98a3; font-size: 11px; }
+
+.expense-review-button { min-width: 68px; }
+.expense-file-field { display: block; margin-top: 12px; }
+.expense-file-field > span { display: block; margin-bottom: 5px; color: #667987; font-size: 10px; font-weight: 800; }
+.expense-file-field input { display: block; width: 100%; font-size: 12px; }
+.expense-file-field small { display: block; margin-top: 5px; color: #62737f; font-size: 11px; }
+.expense-form-modal { width: min(640px, 100%); max-height: calc(100vh - 48px); }
+.expense-resubmit { border: 1px solid #e2d8e9; border-radius: 9px; background: #fbf9fd; }
+.expense-warning { margin: 0; border-left: 2px solid #d38b96; background: #fff7f8; padding: 9px 11px; color: #8f3f4c; font-size: 12px; font-weight: 600; line-height: 1.5; }
+
+.expense-type-toggle { display: inline-flex; overflow: hidden; margin-bottom: 14px; border: 1px solid #dce5ea; border-radius: 8px; background: #fff; }
+.expense-type-toggle button { padding: 0 14px; height: 38px; color: #62737f; font-size: 12px; font-weight: 700; white-space: nowrap; }
+.expense-type-toggle button.is-active { background: #eaf8fd; color: #136d90; }
+.expense-balance-preview { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin: 14px 0; border: 1px solid #e2e9ec; border-radius: 9px; background: #fbfdfe; padding: 12px 14px; }
+.expense-balance-preview div { display: grid; gap: 5px; }
+.expense-balance-preview span { color: #7b8894; font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: .03em; }
+.expense-override { margin-top: 4px; }
+
+@media (max-width: 900px) {
+  .expense-review-layout { grid-template-columns: 1fr; }
+  .expense-review-drawer { width: 100vw; }
+}

@@ -63,7 +63,7 @@ function DailyView({ store }: { store: Store }) {
   const clear = () => { setQuery(""); setStatus("All"); setAttention("All"); setDate(dateIso()); };
   const active = Boolean(query || status !== "All" || attention !== "All" || date !== dateIso());
   return <>
-    <div className="erp-summary-strip attendance-summary"><span><b>{allRows.filter((row) => row.status === "Present").length}</b> Present</span><span><b>{allRows.filter((row) => row.activity === "On site").length}</b> On site</span><span><b>{allRows.filter((row) => row.status === "On leave" || row.status === "Training").length}</b> Leave / training</span><button onClick={() => setAttention("Review")}><b>{allRows.filter((row) => row.attention.length > 0).length}</b> Needs review</button></div>
+    <div className="erp-summary-strip attendance-summary"><div><span>Present</span><b>{allRows.filter((row) => row.status === "Present").length}</b></div><div><span>On site</span><b>{allRows.filter((row) => row.activity === "On site").length}</b></div><div><span>Leave / training</span><b>{allRows.filter((row) => row.status === "On leave" || row.status === "Training").length}</b></div><button onClick={() => setAttention("Review")}><span>Needs review</span><b>{allRows.filter((row) => row.attention.length > 0).length}</b></button></div>
     <div className="erp-filters attendance-filters">
       <label className="attendance-search-field"><span>Search engineer</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Name" /></label>
       <label><span>Date</span><input type="date" value={date} onChange={(event) => setDate(event.target.value || dateIso())} /></label>
