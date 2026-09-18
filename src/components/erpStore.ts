@@ -1119,6 +1119,9 @@ let state: Store = {
     // Always scheduled for the real current date, so the engineer's "Today's Jobs" view — and this
     // demo — never goes empty just because real time has moved past the rest of the fixed seed dates.
     { id: "JOB-1046", number: "JOB-1046", type: "Calibration", customer: "Biocon Biologics", siteId: "SITE-08", instrumentIds: [], stockIds: [], description: "Routine preventive check on the environmental monitoring particle counters.", doneAt: "Site visit", scheduledDate: dateIso(), plannedStart: "10:00", hours: 3, engineer: "Nikhil Rao", status: "In progress", startedAt: dateIso(), expectedSpares: [], usedSpares: [], results: [], travelNotes: "", photos: 0, checkIn: { at: nowIso(), syncedAt: nowIso(), source: "Mobile", locationCheck: "Within site area", location: { lat: 12.8455, lng: 77.6605, accuracyM: 14 }, siteDistanceM: 38 }, activities: [{ title: "Checked in at Electronic City · Biologics Quality Control & Environmental Monitoring Centre", meta: stamp(), tone: "system" }, { title: "Assigned to Nikhil Rao", meta: stamp(), tone: "assigned" }] },
+    // Not checked in yet — always "today", so there's a live job to demo the browser's real
+    // location-permission prompt on, without disturbing JOB-1046's already-checked-in state.
+    { id: "JOB-1047", number: "JOB-1047", type: "Calibration", customer: "Cloudnine Hospitals", siteId: "SITE-09", instrumentIds: [], stockIds: [], description: "Afternoon calibration check for the OT infection-control air sampler.", doneAt: "Site visit", scheduledDate: dateIso(), plannedStart: "14:00", hours: 2, engineer: "Nikhil Rao", status: "Scheduled", expectedSpares: [], usedSpares: [], results: [], travelNotes: "", photos: 0, activities: [{ title: "Assigned to Nikhil Rao", meta: stamp(), tone: "assigned" }] },
   ],
 
   statutoryPaid: {},
