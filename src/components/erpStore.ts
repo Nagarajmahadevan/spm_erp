@@ -1068,6 +1068,8 @@ let state: Store = {
     { id: "att-seed-7", engineer: "Anitha Raj", date: "2026-09-16", kind: "Office check-in", source: "Biometric", at: "2026-09-16T13:10:00.000Z", syncedAt: "2026-09-17T02:35:00.000Z", sourceEventId: "BIO-0916-AR-IN-LATE" },
     // Mirrors JOB-1046's checkIn — always "today", so the live location demo never goes stale.
     { id: "att-seed-8", engineer: "Nikhil Rao", date: dateIso(), kind: "Site check-in", source: "Mobile", at: nowIso(), syncedAt: nowIso(), jobId: "JOB-1046", siteId: "SITE-08", location: { lat: 12.8455, lng: 77.6605, accuracyM: 14 }, siteDistanceM: 38, locationCheck: "Within site area" },
+    // A second engineer, checked in at the office (biometric) rather than a site — also always "today".
+    { id: "att-seed-9", engineer: "Priya Nair", date: dateIso(), kind: "Office check-in", source: "Biometric", at: nowIso(), syncedAt: nowIso(), sourceEventId: "BIO-TODAY-PN-IN" },
   ],
   corrections: [
     { id: "COR-001", eventId: "att-seed-4", engineer: "Sandeep Kulkarni", requestedChange: "Add missing office checkout at 06:10 PM", reason: "Forgot to badge out before leaving for the site visit.", status: "Pending", requestedBy: "Sandeep Kulkarni", requestedAt: "16 Sep 2026 · Sandeep Kulkarni" },

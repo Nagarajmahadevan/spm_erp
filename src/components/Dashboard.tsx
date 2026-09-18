@@ -18,7 +18,7 @@ import Accounts from "./Accounts";
 import Reports from "./Reports";
 import { statusFor as quoteStatusFor } from "./Quotations";
 import { attendanceStatusFor, balanceOf, invoiceTotals, totalOf, useErpStore, type Job } from "./erpStore";
-import { dateIso, dayDifference, engineers, money, prettyDate, totalsFor, weekStart, addDaysIso, initials } from "./erpMasters";
+import { dateIso, dayDifference, engineers, ENGINEER, money, prettyDate, totalsFor, weekStart, addDaysIso, initials } from "./erpMasters";
 
 type Role = "Admin" | "Engineer";
 type IconName = "dashboard" | "attendance" | "expense" | "leads" | "quote" | "purchase" | "invoice" | "stock" | "due" | "accounts" | "reports" | "settings" | "search" | "bell" | "menu" | "chevron" | "more" | "arrow";
@@ -103,6 +103,8 @@ export default function Dashboard() {
   const visibleModules = useMemo(() => modules.filter(([name]) => role === "Admin" || engineerModules.has(name)), [role]);
   const groups = [...new Set(visibleModules.map(([, , group]) => group))];
   const toggleRole = () => { const next = role === "Admin" ? "Engineer" : "Admin"; setRole(next); setActive(next === "Engineer" ? "Jobs" : "Dashboard"); };
+  const displayName = role === "Engineer" ? ENGINEER : "Arun Kumar";
+  const displayInitials = initials(displayName);
 
   // Real dashboard figures — computed from the store, not hardcoded.
   const openQuotes = store.quotes.filter((quote) => quoteStatusFor(quote) === "Draft" || quoteStatusFor(quote) === "Sent");
@@ -171,8 +173,8 @@ export default function Dashboard() {
       <div className="erp-sidebar-footer">
         {role === "Admin" && <button onClick={() => setActive("Settings")} className={`erp-nav-item w-full ${active === "Settings" ? "erp-nav-item--active" : ""}`} title={collapsed ? "Settings" : undefined}><Icon name="settings" /><span>Settings</span></button>}
         <div className="erp-sidebar-user">
-          <button onClick={toggleRole} title="Switch role (demo)" className="erp-avatar" style={{ cursor: "pointer" }}>AK</button>
-          {!collapsed && <button onClick={toggleRole} title="Switch role (demo)" className="text-left"><b>Arun Kumar</b><small>{role}</small></button>}
+          <button onClick={toggleRole} title="Switch role (demo)" className="erp-avatar" style={{ cursor: "pointer" }}>{displayInitials}</button>
+          {!collapsed && <button onClick={toggleRole} title="Switch role (demo)" className="text-left"><b>{displayName}</b><small>{role}</small></button>}
           <button onClick={() => navigate("/login")} title="Sign out" aria-label="Sign out" className="erp-sidebar-signout"><Icon name="arrow" size={15} /></button>
         </div>
       </div>
@@ -180,7 +182,7 @@ export default function Dashboard() {
 
     <div className={`erp-main ${collapsed ? "erp-main--wide" : ""} ${role === "Engineer" ? "erp-main--engineer" : ""}`}>
       <header className="erp-topbar">
-        {role === "Engineer" ? <div className="erp-topbar-engineer"><img src={spmLogo} alt="SPM Lab Solutions" className="h-7 w-auto" /><span>Arun Kumar</span></div> : <div className="relative">
+        {role === "Engineer" ? <div className="erp-topbar-engineer"><img src={spmLogo} alt="SPM Lab Solutions" className="h-7 w-auto" /><span>{displayName}</span></div> : <div className="relative">
           <div className="erp-search"><Icon name="search" /><input value={search} onChange={(event) => { setSearch(event.target.value); setSearchOpen(true); }} onFocus={() => setSearchOpen(true)} onBlur={() => window.setTimeout(() => setSearchOpen(false), 150)} onKeyDown={(event) => { if (event.key === "Escape") { setSearch(""); setSearchOpen(false); } }} placeholder="Search customers, orders, invoices, jobs, stock…" aria-label="Global search" /><kbd>⌘ K</kbd></div>
           {searchOpen && search.trim() && <div className="erp-popover">
             <p className="mb-2 text-xs font-semibold text-[#3d4a5c]">Search results</p>
@@ -194,7 +196,7 @@ export default function Dashboard() {
       </header>
       <main className="erp-content">
         {active === "Settings" ? <Settings /> : active === "Stock" ? <Stock isEngineer={role === "Engineer"} focusItem={stockFocus} onCreatePO={goToLowStockPO} onOpenRental={goToRentals} /> : active === "Leads" ? <Leads openQuote={goToQuote} /> : active === "Quotations" ? <Quotations focusQuote={quoteFocus} /> : active === "Orders" ? <Orders focusOrder={orderFocus} openJob={goToJob} openInvoice={goToInvoice} newJob={goToNewJob} openRentals={goToRentals} /> : active === "Invoices" ? <Invoices focusInvoice={invoiceFocus} /> : active === "Purchases" ? <PurchaseOrders autoStartLow={poAutoStartLow} /> : active === "Rentals" ? <Rentals focus={rentalFocus} /> : active === "Due Dates" ? <DueDates isEngineer={role === "Engineer"} focusItem={dueItemFocus} openInvoice={goToInvoice} openJob={goToJob} /> : active === "Customers" ? <Customers focusCustomer={customerFocus} openJob={goToJob} openInvoice={goToInvoice} /> : active === "Jobs" ? <Jobs isEngineer={role === "Engineer"} focusJob={jobFocus} newJobPrefill={jobPrefill} openInvoice={goToInvoice} /> : active === "Attendance" ? <Attendance /> : active === "Expenses" ? <AdvanceExpense isEngineer={role === "Engineer"} focusEngineer={engineerFocus} /> : active === "Accounts" ? <Accounts openInvoice={goToInvoice} /> : active === "Reports" ? <Reports openInvoice={goToInvoice} openJob={goToJob} openStockItem={goToStockItem} openEngineer={goToEngineer} /> : <>
-        <div className="mb-8 flex flex-wrap items-end justify-between gap-4"><div><p className="erp-secondary-text">{new Intl.DateTimeFormat("en-IN", { weekday: "long", day: "numeric", month: "long" }).format(new Date())}</p><h1>Good morning, Arun</h1><p className="erp-secondary-text mt-1">Here’s a quick view of what needs your attention.</p></div><button className="erp-action" onClick={() => setActive("Quotations")}>Create quotation <Icon name="arrow" size={16} /></button></div>
+        <div className="mb-8 flex flex-wrap items-end justify-between gap-4"><div><p className="erp-secondary-text">{new Intl.DateTimeFormat("en-IN", { weekday: "long", day: "numeric", month: "long" }).format(new Date())}</p><h1>Good morning, Arun</h1><p className="erp-secondary-text mt-1">Here’s a quick view of what needs your attention.</p></div></div>
         <section className="erp-stats" aria-label="Business summary">
           {[
             { label: "Open quotations", value: String(openQuotes.length).padStart(2, "0"), detail: money(openQuotesValue), icon: "quote" as const, tone: "sales", onClick: () => setActive("Quotations") },
@@ -211,10 +213,10 @@ export default function Dashboard() {
       </main>
       {role === "Engineer" && <nav className="erp-mobile-tabbar" aria-label="Engineer navigation">
         {visibleModules.map(([name, icon]) => <button key={name} className={active === name ? "is-active" : ""} onClick={() => { setActive(name); setMobileMenuOpen(false); }}><Icon name={icon as IconName} /><span>{name}</span></button>)}
-        <button className={mobileMenuOpen ? "is-active" : ""} onClick={() => setMobileMenuOpen((value) => !value)} aria-expanded={mobileMenuOpen}><span className="erp-mobile-tabbar-avatar">AK</span><span>Account</span></button>
+        <button className={mobileMenuOpen ? "is-active" : ""} onClick={() => setMobileMenuOpen((value) => !value)} aria-expanded={mobileMenuOpen}><span className="erp-mobile-tabbar-avatar">{displayInitials}</span><span>Account</span></button>
       </nav>}
       {mobileMenuOpen && <div className="erp-mobile-menu-backdrop" onClick={() => setMobileMenuOpen(false)}><div className="erp-mobile-menu" onClick={(event) => event.stopPropagation()}>
-        <div className="erp-mobile-menu-head"><span className="erp-avatar">AK</span><div><b>Arun Kumar</b><small>{role}</small></div></div>
+        <div className="erp-mobile-menu-head"><span className="erp-avatar">{displayInitials}</span><div><b>{displayName}</b><small>{role}</small></div></div>
         <button onClick={() => { setMobileMenuOpen(false); toggleRole(); }}>Switch to Admin</button>
         <button onClick={() => { setMobileMenuOpen(false); navigate("/login"); }}>Sign out</button>
       </div></div>}
